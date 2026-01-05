@@ -1,0 +1,24 @@
+services:
+  ember:
+    build: .
+    ports:
+      - "8001:8001"
+    environment:
+      - ENVIRONMENT=production
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET}
+      - FIRMS_MAP_KEY=${FIRMS_MAP_KEY}
+      - COPERNICUS_CLIENT_ID=${COPERNICUS_CLIENT_ID:-}
+      - COPERNICUS_CLIENT_SECRET=${COPERNICUS_CLIENT_SECRET:-}
+      - LANDFIRE_S3_PREFIX=${LANDFIRE_S3_PREFIX:-}
+      - LANDFIRE_COG_URL=${LANDFIRE_COG_URL:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_REGION=${AWS_REGION:-us-west-2}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
