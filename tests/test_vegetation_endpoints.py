@@ -177,12 +177,12 @@ def mock_error_response():
 def clear_vegetation_cache():
     """Clear vegetation cache before and after each test."""
     from ember.services.copernicus import _vegetation_cache
-    
+
     original_cache = _vegetation_cache.copy()
     _vegetation_cache.clear()
-    
+
     yield
-    
+
     _vegetation_cache.clear()
     _vegetation_cache.update(original_cache)
 
@@ -199,7 +199,11 @@ class TestGetNDVI:
     @patch("ember.services.copernicus.httpx.AsyncClient")
     @patch("ember.services.copernicus.rasterio.open")
     async def test_successful_ndvi_stats_retrieval(
-        self, mock_rasterio_open, mock_client_class, yosemite_coords, mock_ndvi_stats_response
+        self,
+        mock_rasterio_open,
+        mock_client_class,
+        yosemite_coords,
+        mock_ndvi_stats_response,
     ):
         """Test successful retrieval of NDVI statistics.
 
@@ -214,7 +218,7 @@ class TestGetNDVI:
         mock_token_response = MagicMock()
         mock_token_response.json.return_value = {
             "access_token": "test_token",
-            "expires_in": 3600
+            "expires_in": 3600,
         }
         mock_token_response.raise_for_status = MagicMock()
 
@@ -225,16 +229,21 @@ class TestGetNDVI:
 
         # Setup mock client with async context manager
         mock_client = AsyncMock()
-        mock_client.post = AsyncMock(side_effect=[
-            mock_token_response,  # First call for token
-            mock_process_response  # Second call for process API
-        ])
+        mock_client.post = AsyncMock(
+            side_effect=[
+                mock_token_response,  # First call for token
+                mock_process_response,  # Second call for process API
+            ]
+        )
         mock_client_class.return_value.__aenter__.return_value = mock_client
 
         # Setup mock rasterio operations
         import numpy as np
+
         mock_raster = MagicMock()
-        mock_raster.read.return_value = np.array([[0.65, 0.70, 0.60]])  # Mock NDVI values as numpy array
+        mock_raster.read.return_value = np.array(
+            [[0.65, 0.70, 0.60]]
+        )  # Mock NDVI values as numpy array
         mock_rasterio_open.return_value.__enter__.return_value = mock_raster
 
         service = CopernicusService()
@@ -258,7 +267,11 @@ class TestGetNDVI:
     @patch("ember.services.copernicus.httpx.AsyncClient")
     @patch("ember.services.copernicus.rasterio.open")
     async def test_successful_ndvi_raster_retrieval(
-        self, mock_rasterio_open, mock_client_class, yosemite_coords, mock_ndvi_raster_response
+        self,
+        mock_rasterio_open,
+        mock_client_class,
+        yosemite_coords,
+        mock_ndvi_raster_response,
     ):
         """Test successful retrieval of NDVI raster data.
 
@@ -272,7 +285,7 @@ class TestGetNDVI:
         mock_token_response = MagicMock()
         mock_token_response.json.return_value = {
             "access_token": "test_token",
-            "expires_in": 3600
+            "expires_in": 3600,
         }
         mock_token_response.raise_for_status = MagicMock()
 
@@ -283,16 +296,21 @@ class TestGetNDVI:
 
         # Setup mock client with async context manager
         mock_client = AsyncMock()
-        mock_client.post = AsyncMock(side_effect=[
-            mock_token_response,  # First call for token
-            mock_process_response  # Second call for process API
-        ])
+        mock_client.post = AsyncMock(
+            side_effect=[
+                mock_token_response,  # First call for token
+                mock_process_response,  # Second call for process API
+            ]
+        )
         mock_client_class.return_value.__aenter__.return_value = mock_client
 
         # Setup mock rasterio operations
         import numpy as np
+
         mock_raster = MagicMock()
-        mock_raster.read.return_value = np.array([[0.65, 0.70, 0.60]])  # Mock NDVI values as numpy array
+        mock_raster.read.return_value = np.array(
+            [[0.65, 0.70, 0.60]]
+        )  # Mock NDVI values as numpy array
         mock_rasterio_open.return_value.__enter__.return_value = mock_raster
 
         service = CopernicusService()
@@ -315,7 +333,11 @@ class TestGetNDVI:
     @patch("ember.services.copernicus.httpx.AsyncClient")
     @patch("ember.services.copernicus.rasterio.open")
     async def test_successful_ndvi_bbox_retrieval(
-        self, mock_rasterio_open, mock_client_class, yosemite_bbox, mock_ndvi_stats_response
+        self,
+        mock_rasterio_open,
+        mock_client_class,
+        yosemite_bbox,
+        mock_ndvi_stats_response,
     ):
         """Test successful retrieval of NDVI using bbox parameters.
 
@@ -328,7 +350,7 @@ class TestGetNDVI:
         mock_token_response = MagicMock()
         mock_token_response.json.return_value = {
             "access_token": "test_token",
-            "expires_in": 3600
+            "expires_in": 3600,
         }
         mock_token_response.raise_for_status = MagicMock()
 
@@ -339,16 +361,21 @@ class TestGetNDVI:
 
         # Setup mock client with async context manager
         mock_client = AsyncMock()
-        mock_client.post = AsyncMock(side_effect=[
-            mock_token_response,  # First call for token
-            mock_process_response  # Second call for process API
-        ])
+        mock_client.post = AsyncMock(
+            side_effect=[
+                mock_token_response,  # First call for token
+                mock_process_response,  # Second call for process API
+            ]
+        )
         mock_client_class.return_value.__aenter__.return_value = mock_client
 
         # Setup mock rasterio operations
         import numpy as np
+
         mock_raster = MagicMock()
-        mock_raster.read.return_value = np.array([[0.65, 0.70, 0.60]])  # Mock NDVI values as numpy array
+        mock_raster.read.return_value = np.array(
+            [[0.65, 0.70, 0.60]]
+        )  # Mock NDVI values as numpy array
         mock_rasterio_open.return_value.__enter__.return_value = mock_raster
 
         service = CopernicusService()
@@ -372,8 +399,8 @@ class TestGetNDVI:
         "lat,lon,size_km,expected_status",
         [
             (38.85, -120.89, 5.0, "not_configured"),  # Yosemite
-            (34.05, -118.24, 10.0, "not_configured"), # Los Angeles
-            (40.71, -74.00, 2.5, "not_configured"),   # New York
+            (34.05, -118.24, 10.0, "not_configured"),  # Los Angeles
+            (40.71, -74.00, 2.5, "not_configured"),  # New York
         ],
     )
     async def test_ndvi_stats_various_locations(
@@ -395,16 +422,20 @@ class TestGetNDVI:
         )
         assert result["status"] == "not_configured"
         if format == "stats":
-            assert "ndvi" not in result  # Stats should not be present when not configured
+            assert (
+                "ndvi" not in result
+            )  # Stats should not be present when not configured
         elif format == "raster":
-            assert "raster" not in result  # Raster should not be present when not configured
+            assert (
+                "raster" not in result
+            )  # Raster should not be present when not configured
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "min_lat,max_lat,min_lon,max_lon",
         [
             (38.5, 39.2, -121.5, -120.3),  # Yosemite
-            (34.0, 34.5, -118.5, -118.0),    # Los Angeles
+            (34.0, 34.5, -118.5, -118.0),  # Los Angeles
         ],
     )
     async def test_ndvi_bbox_mode(
@@ -433,7 +464,11 @@ class TestGetNDMI:
     @patch("ember.services.copernicus.httpx.AsyncClient")
     @patch("ember.services.copernicus.rasterio.open")
     async def test_successful_ndmi_retrieval(
-        self, mock_rasterio_open, mock_client_class, yosemite_coords, mock_ndmi_stats_response
+        self,
+        mock_rasterio_open,
+        mock_client_class,
+        yosemite_coords,
+        mock_ndmi_stats_response,
     ):
         """Test successful retrieval of NDMI statistics.
 
@@ -447,7 +482,7 @@ class TestGetNDMI:
         mock_token_response = MagicMock()
         mock_token_response.json.return_value = {
             "access_token": "test_token",
-            "expires_in": 3600
+            "expires_in": 3600,
         }
         mock_token_response.raise_for_status = MagicMock()
 
@@ -458,16 +493,21 @@ class TestGetNDMI:
 
         # Setup mock client with async context manager
         mock_client = AsyncMock()
-        mock_client.post = AsyncMock(side_effect=[
-            mock_token_response,  # First call for token
-            mock_process_response  # Second call for process API
-        ])
+        mock_client.post = AsyncMock(
+            side_effect=[
+                mock_token_response,  # First call for token
+                mock_process_response,  # Second call for process API
+            ]
+        )
         mock_client_class.return_value.__aenter__.return_value = mock_client
 
         # Setup mock rasterio operations
         import numpy as np
+
         mock_raster = MagicMock()
-        mock_raster.read.return_value = np.array([[0.25, 0.30, 0.20]])  # Mock NDMI values as numpy array
+        mock_raster.read.return_value = np.array(
+            [[0.25, 0.30, 0.20]]
+        )  # Mock NDMI values as numpy array
         mock_rasterio_open.return_value.__enter__.return_value = mock_raster
 
         service = CopernicusService()
@@ -491,7 +531,7 @@ class TestGetNDMI:
         "lat,lon,size_km",
         [
             (38.85, -120.89, 5.0),  # Yosemite
-            (34.05, -118.24, 10.0), # Los Angeles
+            (34.05, -118.24, 10.0),  # Los Angeles
         ],
     )
     async def test_ndmi_endpoint(self, lat, lon, size_km, copernicus_service_fixture):
@@ -561,7 +601,11 @@ class TestParameterValidation:
     )
     @patch("ember.services.copernicus.httpx.AsyncClient")
     async def test_bbox_validation_errors(
-        self, mock_client_class, invalid_bbox, error_detail, copernicus_service_with_credentials
+        self,
+        mock_client_class,
+        invalid_bbox,
+        error_detail,
+        copernicus_service_with_credentials,
     ):
         """Test bbox coordinate validation - should fail before API call."""
         # Setup mock client (though validation should prevent it from being called)
@@ -606,19 +650,28 @@ class TestParameterValidation:
     )
     @patch("ember.services.copernicus.httpx.AsyncClient")
     async def test_date_validation(
-        self, mock_client_class, invalid_date, date_param, copernicus_service_with_credentials
+        self,
+        mock_client_class,
+        invalid_date,
+        date_param,
+        copernicus_service_with_credentials,
     ):
         """Test date parameter validation - should fail before API call for invalid types."""
         # Setup mock client (though validation should prevent it from being called)
         mock_client = AsyncMock()
         mock_client_class.return_value.__aenter__.return_value = mock_client
 
-        params = {"lat": 38.85, "lon": -120.89, "size_km": 5.0, date_param: invalid_date}
-        
+        params = {
+            "lat": 38.85,
+            "lon": -120.89,
+            "size_km": 5.0,
+            date_param: invalid_date,
+        }
+
         result = await copernicus_service_with_credentials.get_ndvi(
             format="stats", **params
         )
-        
+
         # None should be fine (defaults will be used)
         if invalid_date is None:
             # With credentials set, it will try to make API call, but that's expected behavior
@@ -652,7 +705,9 @@ class TestCacheManagement:
             ("get_ndmi", {"lat": 38.85, "lon": -120.89, "size_km": 5.0}),
         ],
     )
-    async def test_cache_key_generation(self, service_method, params, copernicus_service_fixture):
+    async def test_cache_key_generation(
+        self, service_method, params, copernicus_service_fixture
+    ):
         """Test that cache keys are generated without errors."""
         method = getattr(copernicus_service_fixture, service_method)
 
@@ -747,7 +802,9 @@ class TestRealAPIIntegration:
         if not service.client_id or not service.client_secret:
             pytest.skip("Real credentials not available")
 
-        result = await service.get_ndvi(lat=38.85, lon=-120.89, size_km=5.0, format="stats")
+        result = await service.get_ndvi(
+            lat=38.85, lon=-120.89, size_km=5.0, format="stats"
+        )
 
         assert result["status"] == "success"
         assert "ndvi" in result
