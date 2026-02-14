@@ -201,6 +201,13 @@ class CopernicusService:
                 "message": "Copernicus credentials not configured",
             }
 
+        # Validate format parameter
+        if format not in ["stats", "raster"]:
+            return {
+                "status": "error",
+                "message": "Invalid format. Must be 'stats' or 'raster'",
+            }
+
         # Validate parameter combinations
         if (lat is None) != (lon is None):
             return {
@@ -220,6 +227,32 @@ class CopernicusService:
             return {
                 "status": "error",
                 "message": "size_km must be between 1 and 100 when using lat/lon mode",
+            }
+
+        # Validate bbox coordinates if provided
+        if min_lat is not None and max_lat is not None and min_lat >= max_lat:
+            return {
+                "status": "error",
+                "message": "min_lat must be less than max_lat",
+            }
+
+        if min_lon is not None and max_lon is not None and min_lon >= max_lon:
+            return {
+                "status": "error",
+                "message": "min_lon must be less than max_lon",
+            }
+
+        # Validate date parameters
+        if start_date is not None and not isinstance(start_date, str):
+            return {
+                "status": "error",
+                "message": "start_date must be a string in YYYY-MM-DD format",
+            }
+
+        if end_date is not None and not isinstance(end_date, str):
+            return {
+                "status": "error",
+                "message": "end_date must be a string in YYYY-MM-DD format",
             }
 
         # Set default dates
@@ -413,6 +446,13 @@ class CopernicusService:
                 "message": "Copernicus credentials not configured",
             }
 
+        # Validate format parameter
+        if format not in ["stats", "raster"]:
+            return {
+                "status": "error",
+                "message": "Invalid format. Must be 'stats' or 'raster'",
+            }
+
         # Validate parameter combinations
         if (lat is None) != (lon is None):
             return {
@@ -432,6 +472,32 @@ class CopernicusService:
             return {
                 "status": "error",
                 "message": "size_km must be between 1 and 100 when using lat/lon mode",
+            }
+
+        # Validate bbox coordinates if provided
+        if min_lat is not None and max_lat is not None and min_lat >= max_lat:
+            return {
+                "status": "error",
+                "message": "min_lat must be less than max_lat",
+            }
+
+        if min_lon is not None and max_lon is not None and min_lon >= max_lon:
+            return {
+                "status": "error",
+                "message": "min_lon must be less than max_lon",
+            }
+
+        # Validate date parameters
+        if start_date is not None and not isinstance(start_date, str):
+            return {
+                "status": "error",
+                "message": "start_date must be a string in YYYY-MM-DD format",
+            }
+
+        if end_date is not None and not isinstance(end_date, str):
+            return {
+                "status": "error",
+                "message": "end_date must be a string in YYYY-MM-DD format",
             }
 
         # Set default dates
