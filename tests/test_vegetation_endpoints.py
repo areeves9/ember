@@ -451,6 +451,112 @@ class TestGetNDVI:
         )
         assert result["status"] == "not_configured"
 
+    # Error handling tests
+
+    @pytest.mark.asyncio
+    @patch("ember.services.copernicus.httpx.AsyncClient")
+    async def test_ndvi_network_failure(self, mock_client_class, yosemite_coords):
+        """Test NDVI retrieval when network connection fails.
+
+        Verifies that:
+        - Service handles network errors gracefully
+        - Returns error status with descriptive message
+        - No unhandled exceptions propagate
+        """
+        import httpx
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            side_effect=httpx.RequestError("Connection refused")
+        )
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+
+        service = CopernicusService()
+        service.client_id = "test"
+        service.client_secret = "test"
+
+        result = await service.get_ndvi(
+            lat=yosemite_coords["lat"],
+            lon=yosemite_coords["lon"],
+            size_km=5.0,
+            format="stats"
+        )
+
+        assert isinstance(result, dict)
+        assert result["status"] == "error"
+        assert "message" in result
+
+    @pytest.mark.asyncio
+    @patch("ember.services.copernicus.httpx.AsyncClient")
+    async def test_ndvi_http_status_error(self, mock_client_class, yosemite_coords):
+        """Test NDVI retrieval when API returns HTTP error status.
+
+        Verifies that:
+        - Service handles 401/404/500 errors gracefully
+        - Returns error status with descriptive message
+        - Authentication failures are properly reported
+        """
+        import httpx
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "401 Unauthorized",
+            request=MagicMock(),
+            response=MagicMock()
+        )
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+
+        service = CopernicusService()
+        service.client_id = "test"
+        service.client_secret = "test"
+
+        result = await service.get_ndvi(
+            lat=yosemite_coords["lat"],
+            lon=yosemite_coords["lon"],
+            size_km=5.0,
+            format="stats"
+        )
+
+        assert isinstance(result, dict)
+        assert result["status"] == "error"
+        assert "message" in result
+
+    @pytest.mark.asyncio
+    @patch("ember.services.copernicus.httpx.AsyncClient")
+    async def test_ndvi_json_parse_error(self, mock_client_class, yosemite_coords):
+        """Test NDVI retrieval when API returns invalid JSON.
+
+        Verifies that:
+        - Service handles malformed responses gracefully
+        - Returns error status when JSON parsing fails
+        - No unhandled ValueError exceptions
+        """
+        mock_response = MagicMock()
+        mock_response.json.side_effect = ValueError("Invalid JSON")
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+
+        service = CopernicusService()
+        service.client_id = "test"
+        service.client_secret = "test"
+
+        result = await service.get_ndvi(
+            lat=yosemite_coords["lat"],
+            lon=yosemite_coords["lon"],
+            size_km=5.0,
+            format="stats"
+        )
+
+        assert isinstance(result, dict)
+        assert result["status"] == "error"
+        assert "message" in result
+
 
 # ============================================================================
 # TESTS - get_ndmi
@@ -657,8 +763,23 @@ class TestParameterValidation:
         copernicus_service_with_credentials,
     ):
         """Test date parameter validation - should fail before API call for invalid types."""
-        # Setup mock client (though validation should prevent it from being called)
+        # Setup mock responses to prevent unawaited coroutine warnings
+        mock_token_response = MagicMock()
+        mock_token_response.json.return_value = {
+            "access_token": "test_token",
+            "expires_in": 3600
+        }
+        mock_token_response.raise_for_status = MagicMock()
+
+        mock_process_response = MagicMock()
+        mock_process_response.content = b"fake_geotiff_data"
+        mock_process_response.raise_for_status = MagicMock()
+
         mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=[
+            mock_token_response,
+            mock_process_response
+        ])
         mock_client_class.return_value.__aenter__.return_value = mock_client
 
         params = {
