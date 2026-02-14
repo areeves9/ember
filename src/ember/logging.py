@@ -68,7 +68,11 @@ class DevFormatter(logging.Formatter):
         if record.levelno >= logging.ERROR:
             msg = f"{BOLD}{msg}{RESET}"
 
-        log_line = f"ember   | {DIM}{ts}{RESET} | " f"{color}{level:<8}{RESET} | " f"{name} | {msg}"
+        log_line = (
+            f"ember   | {DIM}{ts}{RESET} | "
+            f"{color}{level:<8}{RESET} | "
+            f"{name} | {msg}"
+        )
 
         if record.exc_info:
             log_line += "\n" + self.formatException(record.exc_info)
@@ -154,7 +158,9 @@ def configure_logging(config: Any) -> None:
 
     # Log configuration
     logger = logging.getLogger(__name__)
-    logger.debug(f"Logging configured: level={config.log_level}, format={config.log_format}")
+    logger.debug(
+        f"Logging configured: level={config.log_level}, format={config.log_format}"
+    )
 
 
 def get_logger(name: str) -> logging.Logger:

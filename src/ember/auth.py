@@ -56,7 +56,11 @@ async def verify_token(
     Raises HTTPException if invalid or missing.
     """
     # Skip auth in development if not configured
-    if settings.is_development and not settings.supabase_url and not settings.supabase_jwt_secret:
+    if (
+        settings.is_development
+        and not settings.supabase_url
+        and not settings.supabase_jwt_secret
+    ):
         return {"sub": "dev-user", "email": "dev@localhost"}
 
     if credentials is None:

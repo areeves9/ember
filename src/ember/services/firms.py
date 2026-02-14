@@ -139,9 +139,13 @@ class FirmsService:
                 detection = {
                     "lat": float(row.get("latitude", 0)),
                     "lon": float(row.get("longitude", 0)),
-                    "brightness": float(row.get("bright_ti4", 0) or row.get("brightness", 0)),
+                    "brightness": float(
+                        row.get("bright_ti4", 0) or row.get("brightness", 0)
+                    ),
                     "frp": float(row.get("frp", 0) or 0),
-                    "confidence": self._normalize_confidence(row.get("confidence", "nominal")),
+                    "confidence": self._normalize_confidence(
+                        row.get("confidence", "nominal")
+                    ),
                     "acq_date": row.get("acq_date", ""),
                     "acq_time": row.get("acq_time", ""),
                     "satellite": row.get("satellite", ""),
@@ -228,7 +232,11 @@ class FirmsService:
         confidence_map = {"low": 1, "nominal": 2, "high": 3}
         confidences = [confidence_map.get(d["confidence"], 2) for d in detections]
         avg_conf_num = sum(confidences) / len(confidences)
-        avg_confidence = "low" if avg_conf_num < 1.5 else ("high" if avg_conf_num > 2.5 else "nominal")
+        avg_confidence = (
+            "low"
+            if avg_conf_num < 1.5
+            else ("high" if avg_conf_num > 2.5 else "nominal")
+        )
 
         # Time range
         datetimes = []
@@ -269,7 +277,9 @@ class FirmsService:
             "latest": latest,
         }
 
-    def _compute_convex_hull(self, lats: list[float], lons: list[float]) -> list[tuple[float, float]] | None:
+    def _compute_convex_hull(
+        self, lats: list[float], lons: list[float]
+    ) -> list[tuple[float, float]] | None:
         """
         Compute convex hull of points.
 
@@ -279,7 +289,9 @@ class FirmsService:
             return None
 
         try:
-            points = np.array(list(zip(lons, lats)))  # scipy expects (x, y) = (lon, lat)
+            points = np.array(
+                list(zip(lons, lats))
+            )  # scipy expects (x, y) = (lon, lat)
             hull = ConvexHull(points)
             vertices = [(lats[i], lons[i]) for i in hull.vertices]
             # Close the polygon

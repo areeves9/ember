@@ -99,9 +99,7 @@ class COGService:
 
                 # Transform coordinates if needed
                 if crs and str(crs) != "EPSG:4326":
-                    transformer = Transformer.from_crs(
-                        "EPSG:4326", crs, always_xy=True
-                    )
+                    transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
                     x, y = transformer.transform(lon, lat)
                 else:
                     x, y = lon, lat
@@ -133,7 +131,7 @@ class COGService:
                 value = values[band - 1]
 
                 # Handle nodata
-                nodata = getattr(info, 'nodata', None)
+                nodata = getattr(info, "nodata", None)
                 if nodata is not None and value == nodata:
                     return {
                         "status": "nodata",
@@ -186,11 +184,11 @@ class COGService:
                         "top": bounds[3],
                     },
                     "crs": str(info.crs) if info.crs else None,
-                    "width": getattr(info, 'width', None),
-                    "height": getattr(info, 'height', None),
-                    "band_count": getattr(info, 'count', None),
-                    "dtype": getattr(info, 'dtype', None),
-                    "nodata": getattr(info, 'nodata', None),
+                    "width": getattr(info, "width", None),
+                    "height": getattr(info, "height", None),
+                    "band_count": getattr(info, "count", None),
+                    "dtype": getattr(info, "dtype", None),
+                    "nodata": getattr(info, "nodata", None),
                 }
 
         except Exception as e:

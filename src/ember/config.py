@@ -29,7 +29,9 @@ class Settings(BaseSettings):
 
     # Supabase Auth
     supabase_url: str = Field(default="", description="Supabase project URL for JWKS")
-    supabase_jwt_secret: str = Field(default="", description="Supabase JWT secret (HS256 fallback)")
+    supabase_jwt_secret: str = Field(
+        default="", description="Supabase JWT secret (HS256 fallback)"
+    )
 
     # API Keys
     firms_map_key: str = Field(default="", description="NASA FIRMS MAP_KEY")
@@ -45,15 +47,23 @@ class Settings(BaseSettings):
         description="S3 prefix for LANDFIRE layers",
     )
     # Legacy: single fuel model URL (deprecated, use landfire_s3_prefix)
-    landfire_cog_url: str = Field(default="", description="FBFM40 fuel model URL (legacy)")
+    landfire_cog_url: str = Field(
+        default="", description="FBFM40 fuel model URL (legacy)"
+    )
 
     # AWS credentials for S3 COG access
-    aws_access_key_id: str = Field(default="", description="AWS access key for S3 COG access")
-    aws_secret_access_key: str = Field(default="", description="AWS secret key for S3 COG access")
+    aws_access_key_id: str = Field(
+        default="", description="AWS access key for S3 COG access"
+    )
+    aws_secret_access_key: str = Field(
+        default="", description="AWS secret key for S3 COG access"
+    )
     aws_region: str = Field(default="us-west-2", description="AWS region for S3")
 
     # Request timeouts
-    http_timeout: float = Field(default=30.0, description="HTTP client timeout in seconds")
+    http_timeout: float = Field(
+        default=30.0, description="HTTP client timeout in seconds"
+    )
 
     # Logging
     log_level: str = Field(default="INFO", description="Log level")
@@ -65,7 +75,9 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> list[str]:
         """Get CORS origins as a list."""
-        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+        return [
+            origin.strip() for origin in self.cors_origins.split(",") if origin.strip()
+        ]
 
     @property
     def is_development(self) -> bool:

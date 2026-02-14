@@ -24,28 +24,63 @@ _CACHE_MAX_SIZE = 1000  # Max entries before purge
 # Layer name -> file pattern mapping
 # Pattern matches: LC{YY}_{PATTERN}_{RES}.tif
 LAYER_PATTERNS = {
-    "fuel": "F40",           # FBFM40 fuel model (91-204 -> NB1, GR2, SH5, etc.)
-    "slope": "SlpD",         # Slope in degrees (0-90)
-    "aspect": "Asp",         # Aspect in degrees (0-360, -1 = flat)
-    "elevation": "Elev",     # Elevation in meters
-    "canopy_height": "CH",   # Canopy height in meters * 10
+    "fuel": "F40",  # FBFM40 fuel model (91-204 -> NB1, GR2, SH5, etc.)
+    "slope": "SlpD",  # Slope in degrees (0-90)
+    "aspect": "Asp",  # Aspect in degrees (0-360, -1 = flat)
+    "elevation": "Elev",  # Elevation in meters
+    "canopy_height": "CH",  # Canopy height in meters * 10
     "canopy_base_height": "CBH",  # Canopy base height in meters * 10
-    "canopy_bulk_density": "CBD", # Canopy bulk density kg/m³ * 100
-    "canopy_cover": "CC",    # Canopy cover percent (0-100)
+    "canopy_bulk_density": "CBD",  # Canopy bulk density kg/m³ * 100
+    "canopy_cover": "CC",  # Canopy cover percent (0-100)
 }
 
 # FBFM40 pixel value -> fuel code mapping
 FUEL_CODES = {
-    91: "NB1", 92: "NB2", 93: "NB3", 98: "NB8", 99: "NB9",
-    101: "GR1", 102: "GR2", 103: "GR3", 104: "GR4", 105: "GR5",
-    106: "GR6", 107: "GR7", 108: "GR8", 109: "GR9",
-    121: "GS1", 122: "GS2", 123: "GS3", 124: "GS4",
-    141: "SH1", 142: "SH2", 143: "SH3", 144: "SH4", 145: "SH5",
-    146: "SH6", 147: "SH7", 148: "SH8", 149: "SH9",
-    161: "TU1", 162: "TU2", 163: "TU3", 164: "TU4", 165: "TU5",
-    181: "TL1", 182: "TL2", 183: "TL3", 184: "TL4", 185: "TL5",
-    186: "TL6", 187: "TL7", 188: "TL8", 189: "TL9",
-    201: "SB1", 202: "SB2", 203: "SB3", 204: "SB4",
+    91: "NB1",
+    92: "NB2",
+    93: "NB3",
+    98: "NB8",
+    99: "NB9",
+    101: "GR1",
+    102: "GR2",
+    103: "GR3",
+    104: "GR4",
+    105: "GR5",
+    106: "GR6",
+    107: "GR7",
+    108: "GR8",
+    109: "GR9",
+    121: "GS1",
+    122: "GS2",
+    123: "GS3",
+    124: "GS4",
+    141: "SH1",
+    142: "SH2",
+    143: "SH3",
+    144: "SH4",
+    145: "SH5",
+    146: "SH6",
+    147: "SH7",
+    148: "SH8",
+    149: "SH9",
+    161: "TU1",
+    162: "TU2",
+    163: "TU3",
+    164: "TU4",
+    165: "TU5",
+    181: "TL1",
+    182: "TL2",
+    183: "TL3",
+    184: "TL4",
+    185: "TL5",
+    186: "TL6",
+    187: "TL7",
+    188: "TL8",
+    189: "TL9",
+    201: "SB1",
+    202: "SB2",
+    203: "SB3",
+    204: "SB4",
 }
 
 
@@ -234,7 +269,9 @@ def get_terrain_service() -> TerrainService | None:
         return _terrain_service
 
     if not settings.landfire_s3_prefix:
-        logger.warning("LANDFIRE_S3_PREFIX not configured - terrain service unavailable")
+        logger.warning(
+            "LANDFIRE_S3_PREFIX not configured - terrain service unavailable"
+        )
         return None
 
     _terrain_service = TerrainService(settings.landfire_s3_prefix)

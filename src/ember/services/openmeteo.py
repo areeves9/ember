@@ -142,16 +142,24 @@ class OpenMeteoService:
         forecast = []
         dates = daily.get("time", [])
         for i, date in enumerate(dates):
-            forecast.append({
-                "date": date,
-                "temp_max_c": daily.get("temperature_2m_max", [None])[i],
-                "temp_min_c": daily.get("temperature_2m_min", [None])[i],
-                "precip_probability_pct": daily.get("precipitation_probability_max", [None])[i],
-                "wind_speed_max_kmh": daily.get("wind_speed_10m_max", [None])[i],
-                "wind_direction_deg": daily.get("wind_direction_10m_dominant", [None])[i],
-                "weather_code": daily.get("weather_code", [None])[i],
-                "conditions": self._weather_code_to_text(daily.get("weather_code", [None])[i]),
-            })
+            forecast.append(
+                {
+                    "date": date,
+                    "temp_max_c": daily.get("temperature_2m_max", [None])[i],
+                    "temp_min_c": daily.get("temperature_2m_min", [None])[i],
+                    "precip_probability_pct": daily.get(
+                        "precipitation_probability_max", [None]
+                    )[i],
+                    "wind_speed_max_kmh": daily.get("wind_speed_10m_max", [None])[i],
+                    "wind_direction_deg": daily.get(
+                        "wind_direction_10m_dominant", [None]
+                    )[i],
+                    "weather_code": daily.get("weather_code", [None])[i],
+                    "conditions": self._weather_code_to_text(
+                        daily.get("weather_code", [None])[i]
+                    ),
+                }
+            )
 
         result = {
             "status": "success",

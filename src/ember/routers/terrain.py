@@ -14,7 +14,9 @@ router = APIRouter(prefix="/terrain", tags=["terrain"])
 async def get_terrain(
     lat: Annotated[float, Query(ge=-90, le=90, description="Latitude")],
     lon: Annotated[float, Query(ge=-180, le=180, description="Longitude")],
-    layers: Annotated[str | None, Query(description="Comma-separated layer names (default: all)")] = None,
+    layers: Annotated[
+        str | None, Query(description="Comma-separated layer names (default: all)")
+    ] = None,
     # _user: dict = require_auth,  # TODO: Re-enable after testing
 ):
     """
@@ -64,7 +66,11 @@ async def list_layers():
     """List available terrain layers."""
     service = get_terrain_service()
     if not service:
-        return {"available": False, "layers": [], "message": "Terrain service not configured"}
+        return {
+            "available": False,
+            "layers": [],
+            "message": "Terrain service not configured",
+        }
 
     return {
         "available": True,

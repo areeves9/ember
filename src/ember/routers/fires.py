@@ -17,7 +17,9 @@ async def get_fires(
     min_lon: Annotated[float, Query(ge=-180, le=180, description="Western boundary")],
     max_lon: Annotated[float, Query(ge=-180, le=180, description="Eastern boundary")],
     source: Annotated[str, Query(description="Satellite source")] = "VIIRS_SNPP_NRT",
-    days_back: Annotated[int, Query(ge=1, le=10, description="Days of historical data")] = 2,
+    days_back: Annotated[
+        int, Query(ge=1, le=10, description="Days of historical data")
+    ] = 2,
     _user: dict = require_auth,
 ):
     """
