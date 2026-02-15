@@ -45,4 +45,6 @@ async def reverse_geocode(
         result = await nominatim_service.reverse_geocode(lat, lon, zoom)
         return result
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Reverse geocoding error: {str(e)}")
+        raise HTTPException(
+            status_code=502, detail=f"Reverse geocoding error: {str(e)}"
+        )

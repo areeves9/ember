@@ -13,15 +13,8 @@ load_dotenv()
 
 # Import config first
 from ember.config import settings
-from ember.logging import (
-    BOLD_CYAN,
-    BOLD_YELLOW,
-    RESET,
-    YELLOW,
-    configure_logging,
-    get_logger,
-)
-
+from ember.logging import (BOLD_CYAN, BOLD_YELLOW, RESET, YELLOW,
+                           configure_logging, get_logger)
 # Import the app
 from ember.main import app
 
@@ -53,7 +46,9 @@ if settings.is_development:
     logger.info(f"{YELLOW}Log Format: {settings.log_format}{RESET}")
 
 if __name__ == "__main__":
-    logger.info(f"Starting Uvicorn on {BOLD_CYAN}http://{settings.host}:{settings.port}{RESET}")
+    logger.info(
+        f"Starting Uvicorn on {BOLD_CYAN}http://{settings.host}:{settings.port}{RESET}"
+    )
 
     try:
         uvicorn.run(

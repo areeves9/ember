@@ -17,14 +17,8 @@ from ember.api import add_cors_middleware, register_exception_handlers
 from ember.api.logging_middleware import RequestLoggingMiddleware
 from ember.config import settings
 from ember.logging import get_logger
-from ember.routers import (
-    fires_router,
-    fuel_router,
-    geocode_router,
-    terrain_router,
-    vegetation_router,
-    weather_router,
-)
+from ember.routers import (fires_router, fuel_router, geocode_router,
+                           terrain_router, vegetation_router, weather_router)
 
 # Get logger for this module
 # NOTE: Logging is configured in entrypoint.py before importing this module
@@ -54,24 +48,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     if settings.copernicus_client_id:
         logger.info("Copernicus credentials configured")
     else:
-        logger.info("Copernicus not configured - vegetation endpoints will return stubs")
+        logger.info(
+            "Copernicus not configured - vegetation endpoints will return stubs"
+        )
 
     # Initialize terrain service with layer discovery
     if settings.landfire_s3_prefix:
         from ember.services.terrain import get_terrain_service
+
         terrain_svc = get_terrain_service()
         if terrain_svc:
             # Register known layers from S3
             # These are the files we've uploaded
             known_files = [
-                "LC24_F40_250.tif",    # Fuel
-                "LC20_SlpD_220.tif",   # Slope
-                "LC20_Asp_220.tif",    # Aspect
-                "LC20_Elev_220.tif",   # Elevation
-                "LC24_CH_250.tif",     # Canopy Height
-                "LC24_CBH_250.tif",    # Canopy Base Height
-                "LC24_CBD_250.tif",    # Canopy Bulk Density
-                "LC24_CC_250.tif",     # Canopy Cover
+                "LC24_F40_250.tif",  # Fuel
+                "LC20_SlpD_220.tif",  # Slope
+                "LC20_Asp_220.tif",  # Aspect
+                "LC20_Elev_220.tif",  # Elevation
+                "LC24_CH_250.tif",  # Canopy Height
+                "LC24_CBH_250.tif",  # Canopy Base Height
+                "LC24_CBD_250.tif",  # Canopy Bulk Density
+                "LC24_CC_250.tif",  # Canopy Cover
             ]
             discovered = terrain_svc.discover_layers(known_files)
             logger.info(f"Terrain service ready: {len(discovered)} layers available")

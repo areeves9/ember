@@ -34,9 +34,11 @@ async def list_fuel_models():
     """List all FBFM40 fuel model codes and descriptions."""
     models = []
     for code, (fuel_type, description) in FUEL_MODELS.items():
-        models.append({
-            "code": code,
-            "type": fuel_type,
-            "description": description,
-        })
+        models.append(
+            {
+                "code": code,
+                "type": fuel_type,
+                "description": description,
+            }
+        )
     return {"models": models}

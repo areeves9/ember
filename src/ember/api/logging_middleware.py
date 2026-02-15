@@ -35,7 +35,9 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         if status >= 500:
             logger.error(f"{method} {path}{query_str} → {status} ({duration_ms:.1f}ms)")
         elif status >= 400:
-            logger.warning(f"{method} {path}{query_str} → {status} ({duration_ms:.1f}ms)")
+            logger.warning(
+                f"{method} {path}{query_str} → {status} ({duration_ms:.1f}ms)"
+            )
         else:
             logger.info(f"{method} {path}{query_str} → {status} ({duration_ms:.1f}ms)")
 
