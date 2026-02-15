@@ -92,6 +92,13 @@ async def verify_token(
 
     token = credentials.credentials
 
+    # Check if any auth method is configured
+    auth_configured = bool(
+        (settings.auth0_domain and settings.auth0_audience)
+        or settings.supabase_jwks_url
+        or settings.supabase_jwt_secret
+    )
+
     # Try Auth0 M2M first (if configured)
     if settings.auth0_domain and settings.auth0_audience:
         try:
@@ -133,9 +140,18 @@ async def verify_token(
             )
             return {**payload, "auth_type": "user"}
 
+        # If we got here, no auth method is configured
+        if not auth_configured:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="No authentication method configured",
+            )
+
+        # Auth is configured but token failed validation
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="No authentication method configured",
+            detail="Invalid authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
     except JWTError as e:
