@@ -17,8 +17,14 @@ from ember.api import add_cors_middleware, register_exception_handlers
 from ember.api.logging_middleware import RequestLoggingMiddleware
 from ember.config import settings
 from ember.logging import get_logger
-from ember.routers import (fires_router, fuel_router, geocode_router,
-                           terrain_router, vegetation_router, weather_router)
+from ember.routers import (
+    fires_router,
+    fuel_router,
+    geocode_router,
+    terrain_router,
+    vegetation_router,
+    weather_router,
+)
 
 # Get logger for this module
 # NOTE: Logging is configured in entrypoint.py before importing this module

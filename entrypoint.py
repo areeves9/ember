@@ -13,8 +13,15 @@ load_dotenv()
 
 # Import config first
 from ember.config import settings
-from ember.logging import (BOLD_CYAN, BOLD_YELLOW, RESET, YELLOW,
-                           configure_logging, get_logger)
+from ember.logging import (
+    BOLD_CYAN,
+    BOLD_YELLOW,
+    RESET,
+    YELLOW,
+    configure_logging,
+    get_logger,
+)
+
 # Import the app
 from ember.main import app
 

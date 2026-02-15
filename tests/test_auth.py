@@ -28,12 +28,12 @@ class TestUnifiedAuth:
             settings.environment = "development"
 
             result = await verify_token(credentials=None)
-            
+
             # Should return dev user
             assert result["sub"] == "dev-user"
             assert result["email"] == "dev@localhost"
             assert result["auth_type"] == "dev"
-            
+
         finally:
             # Restore original settings
             settings.supabase_url = original_supabase_url
@@ -55,10 +55,10 @@ class TestUnifiedAuth:
 
             with pytest.raises(HTTPException) as exc_info:
                 await verify_token(credentials=None)
-            
+
             assert exc_info.value.status_code == 401
             assert "Missing authorization header" in str(exc_info.value.detail)
-            
+
         finally:
             settings.supabase_url = original_supabase_url
             settings.auth0_domain = original_auth0_domain
@@ -87,7 +87,7 @@ class TestUnifiedAuth:
                         "alg": "RS256",
                         "use": "sig",
                         "n": "mock_n",
-                        "e": "AQAB"
+                        "e": "AQAB",
                     }
                 ]
             }
@@ -97,25 +97,26 @@ class TestUnifiedAuth:
             mock_payload = {
                 "sub": "auth0-service",
                 "iss": "https://test.auth0.com/",
-                "aud": "https://test.api"
+                "aud": "https://test.api",
             }
 
             # Mock the JWKS fetch and JWT decode
-            mocker.patch('ember.auth.fetch_auth0_jwks', return_value=mock_jwks)
-            mocker.patch('ember.auth.get_signing_key', return_value=mock_jwks["keys"][0])
-            mocker.patch('jose.jwt.decode', return_value=mock_payload)
+            mocker.patch("ember.auth.fetch_auth0_jwks", return_value=mock_jwks)
+            mocker.patch(
+                "ember.auth.get_signing_key", return_value=mock_jwks["keys"][0]
+            )
+            mocker.patch("jose.jwt.decode", return_value=mock_payload)
 
             credentials = HTTPAuthorizationCredentials(
-                scheme="Bearer",
-                credentials=mock_token
+                scheme="Bearer", credentials=mock_token
             )
 
             result = await verify_token(credentials=credentials)
-            
+
             # Should return Auth0 payload with m2m auth_type
             assert result["sub"] == "auth0-service"
             assert result["auth_type"] == "m2m"
-            
+
         finally:
             settings.auth0_domain = original_auth0_domain
             settings.auth0_audience = original_auth0_audience
@@ -144,7 +145,7 @@ class TestUnifiedAuth:
                         "use": "sig",
                         "crv": "P-256",
                         "x": "mock_x",
-                        "y": "mock_y"
+                        "y": "mock_y",
                     }
                 ]
             }
@@ -153,26 +154,30 @@ class TestUnifiedAuth:
             mock_payload = {
                 "sub": "supabase-user",
                 "email": "user@test.com",
-                "aud": "authenticated"
+                "aud": "authenticated",
             }
 
-            # Mock the JWKS fetch and JWT decode
-            mocker.patch('ember.auth.fetch_jwks', return_value=mock_jwks)
-            mocker.patch('ember.auth.get_signing_key', return_value=mock_jwks["keys"][0])
-            mocker.patch('jose.jwt.decode', return_value=mock_payload)
+            # Mock the JWKS fetch, key construction, and JWT decode
+            mocker.patch("ember.auth.fetch_jwks", return_value=mock_jwks)
+            mocker.patch(
+                "ember.auth.get_signing_key", return_value=mock_jwks["keys"][0]
+            )
+            # Mock jwk.construct to return a mock public key
+            mock_public_key = mocker.MagicMock()
+            mocker.patch("jose.jwk.construct", return_value=mock_public_key)
+            mocker.patch("jose.jwt.decode", return_value=mock_payload)
 
             credentials = HTTPAuthorizationCredentials(
-                scheme="Bearer",
-                credentials=mock_token
+                scheme="Bearer", credentials=mock_token
             )
 
             result = await verify_token(credentials=credentials)
-            
+
             # Should return Supabase payload with user auth_type
             assert result["sub"] == "supabase-user"
             assert result["email"] == "user@test.com"
             assert result["auth_type"] == "user"
-            
+
         finally:
             settings.supabase_url = original_supabase_url
             settings.auth0_domain = original_auth0_domain
@@ -193,7 +198,9 @@ class TestUnifiedAuth:
             settings.environment = "production"
 
             # Mock Auth0 to fail (raise JWTError)
-            mocker.patch('ember.auth.fetch_auth0_jwks', side_effect=Exception("Auth0 failed"))
+            mocker.patch(
+                "ember.auth.fetch_auth0_jwks", side_effect=Exception("Auth0 failed")
+            )
 
             # Mock Supabase JWKS and token
             mock_jwks = {
@@ -205,7 +212,7 @@ class TestUnifiedAuth:
                         "use": "sig",
                         "crv": "P-256",
                         "x": "mock_x",
-                        "y": "mock_y"
+                        "y": "mock_y",
                     }
                 ]
             }
@@ -214,25 +221,29 @@ class TestUnifiedAuth:
             mock_payload = {
                 "sub": "supabase-user",
                 "email": "user@test.com",
-                "aud": "authenticated"
+                "aud": "authenticated",
             }
 
-            # Mock the Supabase JWKS fetch and JWT decode
-            mocker.patch('ember.auth.fetch_jwks', return_value=mock_jwks)
-            mocker.patch('ember.auth.get_signing_key', return_value=mock_jwks["keys"][0])
-            mocker.patch('jose.jwt.decode', return_value=mock_payload)
+            # Mock the Supabase JWKS fetch, key construction, and JWT decode
+            mocker.patch("ember.auth.fetch_jwks", return_value=mock_jwks)
+            mocker.patch(
+                "ember.auth.get_signing_key", return_value=mock_jwks["keys"][0]
+            )
+            # Mock jwk.construct to return a mock public key
+            mock_public_key = mocker.MagicMock()
+            mocker.patch("jose.jwk.construct", return_value=mock_public_key)
+            mocker.patch("jose.jwt.decode", return_value=mock_payload)
 
             credentials = HTTPAuthorizationCredentials(
-                scheme="Bearer",
-                credentials=mock_token
+                scheme="Bearer", credentials=mock_token
             )
 
             result = await verify_token(credentials=credentials)
-            
+
             # Should return Supabase payload with user auth_type (fallback worked)
             assert result["sub"] == "supabase-user"
             assert result["auth_type"] == "user"
-            
+
         finally:
             settings.auth0_domain = original_auth0_domain
             settings.auth0_audience = original_auth0_audience
