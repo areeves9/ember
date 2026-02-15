@@ -33,6 +33,10 @@ class Settings(BaseSettings):
         default="", description="Supabase JWT secret (HS256 fallback)"
     )
 
+    # Auth0 M2M (Machine-to-Machine)
+    auth0_domain: str = Field(default="", description="Auth0 domain for M2M validation")
+    auth0_audience: str = Field(default="", description="Auth0 API audience/identifier")
+
     # API Keys
     firms_map_key: str = Field(default="", description="NASA FIRMS MAP_KEY")
 
@@ -88,6 +92,13 @@ class Settings(BaseSettings):
         """Get JWKS URL for Supabase JWT verification."""
         if self.supabase_url:
             return f"{self.supabase_url.rstrip('/')}/auth/v1/.well-known/jwks.json"
+        return None
+
+    @property
+    def auth0_jwks_url(self) -> str | None:
+        """Get JWKS URL for Auth0 JWT verification."""
+        if self.auth0_domain:
+            return f"https://{self.auth0_domain}/.well-known/jwks.json"
         return None
 
 
