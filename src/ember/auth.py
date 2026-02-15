@@ -58,22 +58,14 @@ def get_signing_key(token: str, jwks: dict) -> str | None:
     try:
         unverified_header = jwt.get_unverified_header(token)
         kid = unverified_header.get("kid")
-        logger.info(f"Token kid: {kid}")
         if not kid or "keys" not in jwks:
-            logger.info(f"Missing kid ({kid}) or keys in JWKS")
             return None
-
-        # Log available kids in JWKS
-        available_kids = [key.get("kid") for key in jwks.get("keys", [])]
-        logger.info(f"Available kids in JWKS: {available_kids}")
 
         for key in jwks["keys"]:
             if key.get("kid") == kid:
                 return key
-        logger.info(f"Kid {kid} not found in JWKS")
         return None
-    except JWTError as e:
-        logger.error(f"Error getting signing key: {e}")
+    except JWTError:
         return None
 
 
