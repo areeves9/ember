@@ -39,9 +39,12 @@ class OpenMeteoService:
         """
         # Parse and normalize variables for cache key and API request
         if variables:
-            # Split, strip whitespace, filter empty strings, and sort for cache normalization
+            # Split, strip whitespace, filter empty strings
             current_vars = [v.strip() for v in variables.split(",") if v.strip()]
-            # If filtering resulted in empty list, fall back to defaults
+            # De-duplicate while preserving order to avoid cache bloat and redundant API requests
+            seen = set()
+            current_vars = [v for v in current_vars if not (v in seen or seen.add(v))]
+            # If filtering/de-duplication resulted in empty list, fall back to defaults
             if not current_vars:
                 variables = None
 
@@ -94,6 +97,7 @@ class OpenMeteoService:
                 "longitude": lon,
                 "timezone": data.get("timezone"),
                 "current": current,
+                "current_units": data.get("current_units", {}),
             }
         else:
             # Default variables: return transformed format for backward compatibility
