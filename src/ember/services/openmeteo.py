@@ -233,7 +233,7 @@ class OpenMeteoService:
         # Convert hours to days for forecast_days parameter (ceiling division)
         forecast_days = (hours + 23) // 24
 
-        # Check cache (1 hour TTL - hourly data updates frequently)
+        # Check cache (5 minute TTL - hourly data updates frequently)
         cache_key = f"weather:hourly_forecast:{lat:.2f},{lon:.2f}:{hours}h"
         cached = _weather_cache.get(cache_key)
         if cached and (time() - cached["timestamp"] < _WEATHER_CACHE_TTL):
@@ -283,9 +283,9 @@ class OpenMeteoService:
                 "temperature_c": temps[i] if i < len(temps) else None,
                 "humidity_pct": humidities[i] if i < len(humidities) else None,
                 "precipitation_mm": precips[i] if i < len(precips) else None,
-                "wind_speed_kmh": wind_speeds[i] if i < len(wind_speeds) else None,
+                "wind_speed_kmh": wind_speeds[i] * 3.6 if i < len(wind_speeds) else None,
                 "wind_direction_deg": wind_dirs[i] if i < len(wind_dirs) else None,
-                "wind_gusts_kmh": wind_gusts[i] if i < len(wind_gusts) else None,
+                "wind_gusts_kmh": wind_gusts[i] * 3.6 if i < len(wind_gusts) else None,
                 "feels_like_c": apparent_temps[i] if i < len(apparent_temps) else None,
             })
 
@@ -298,9 +298,11 @@ class OpenMeteoService:
             "forecast_hours": len(forecast),
         }
 
-        # Store in cache (1 hour TTL - hourly data updates frequently)
+        # Store in cache (5 minute TTL - hourly data updates frequently)
         if len(_weather_cache) >= _WEATHER_CACHE_MAX_SIZE:
-            _weather_cache.clear()
+            # FIFO eviction: remove oldest item to prevent thundering herd
+            oldest_key = next(iter(_weather_cache))
+            del _weather_cache[oldest_key]
         _weather_cache[cache_key] = {"timestamp": time(), "data": result}
 
         return result
