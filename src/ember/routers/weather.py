@@ -61,3 +61,26 @@ async def get_forecast(
         return result
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Weather API error: {str(e)}")
+
+
+@router.get("/forecast/hourly")
+async def get_hourly_forecast(
+    lat: Annotated[float, Query(ge=-90, le=90, description="Latitude")],
+    lon: Annotated[float, Query(ge=-180, le=180, description="Longitude")],
+    hours: Annotated[
+        int,
+        Query(ge=1, le=384, description="Forecast hours (max 384 = 16 days)")
+    ] = 24,
+    _user: dict = require_auth,
+):
+    """
+    Get hourly weather forecast for a location.
+
+    Returns hourly forecast with temperature, precipitation, wind, and humidity.
+    Maximum forecast range is 384 hours (16 days).
+    """
+    try:
+        result = await openmeteo_service.get_hourly_forecast(lat, lon, hours)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Weather API error: {str(e)}")

@@ -212,6 +212,98 @@ class OpenMeteoService:
 
         return result
 
+    async def get_hourly_forecast(
+        self, lat: float, lon: float, hours: int = 24
+    ) -> dict[str, Any]:
+        """
+        Get hourly weather forecast for a location.
+
+        Args:
+            lat: Latitude
+            lon: Longitude
+            hours: Number of forecast hours (1-384, up to 16 days)
+
+        Returns:
+            Dict with hourly forecast
+        """
+        # Clamp to valid range (Open-Meteo supports up to 16 days = 384 hours)
+        hours = max(1, min(384, hours))
+
+        # Convert hours to days for forecast_days parameter (ceiling division)
+        forecast_days = (hours + 23) // 24
+
+        # Check cache (1 hour TTL - hourly data updates frequently)
+        cache_key = f"weather:hourly_forecast:{lat:.2f},{lon:.2f}:{hours}h"
+        cached = _weather_cache.get(cache_key)
+        if cached and (time() - cached["timestamp"] < _WEATHER_CACHE_TTL):
+            return cached["data"]
+
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": [
+                "temperature_2m",
+                "relative_humidity_2m",
+                "precipitation",
+                "wind_speed_10m",
+                "wind_direction_10m",
+                "wind_gusts_10m",
+                "apparent_temperature",
+            ],
+            "forecast_days": forecast_days,
+            "timezone": "auto",
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                OPENMETEO_BASE_URL,  # Uses /v1/forecast
+                params=params,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+
+        data = response.json()
+        hourly = data.get("hourly", {})
+
+        # Build hourly forecast list (limit to requested hours)
+        timestamps = hourly.get("time", [])[:hours]
+        temps = hourly.get("temperature_2m", [])[:hours]
+        humidities = hourly.get("relative_humidity_2m", [])[:hours]
+        precips = hourly.get("precipitation", [])[:hours]
+        wind_speeds = hourly.get("wind_speed_10m", [])[:hours]
+        wind_dirs = hourly.get("wind_direction_10m", [])[:hours]
+        wind_gusts = hourly.get("wind_gusts_10m", [])[:hours]
+        apparent_temps = hourly.get("apparent_temperature", [])[:hours]
+
+        forecast = []
+        for i, timestamp in enumerate(timestamps):
+            forecast.append({
+                "timestamp": timestamp,
+                "temperature_c": temps[i] if i < len(temps) else None,
+                "humidity_pct": humidities[i] if i < len(humidities) else None,
+                "precipitation_mm": precips[i] if i < len(precips) else None,
+                "wind_speed_kmh": wind_speeds[i] if i < len(wind_speeds) else None,
+                "wind_direction_deg": wind_dirs[i] if i < len(wind_dirs) else None,
+                "wind_gusts_kmh": wind_gusts[i] if i < len(wind_gusts) else None,
+                "feels_like_c": apparent_temps[i] if i < len(apparent_temps) else None,
+            })
+
+        result = {
+            "status": "success",
+            "latitude": lat,
+            "longitude": lon,
+            "timezone": data.get("timezone"),
+            "hourly_forecast": forecast,
+            "forecast_hours": len(forecast),
+        }
+
+        # Store in cache (1 hour TTL - hourly data updates frequently)
+        if len(_weather_cache) >= _WEATHER_CACHE_MAX_SIZE:
+            _weather_cache.clear()
+        _weather_cache[cache_key] = {"timestamp": time(), "data": result}
+
+        return result
+
     def _weather_code_to_text(self, code: int | None) -> str:
         """Convert WMO weather code to human-readable text."""
         if code is None:
