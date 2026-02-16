@@ -21,27 +21,36 @@ class OpenMeteoService:
     def __init__(self):
         self.timeout = settings.http_timeout
 
-    async def get_current_weather(self, lat: float, lon: float) -> dict[str, Any]:
+    async def get_current_weather(
+        self, lat: float, lon: float, variables: str | None = None
+    ) -> dict[str, Any]:
         """
         Get current weather conditions at a location.
 
         Args:
             lat: Latitude
             lon: Longitude
+            variables: Optional comma-separated list of Open-Meteo variable names.
+                      If None, returns default variables with transformed response format.
+                      If provided, returns raw Open-Meteo response format.
 
         Returns:
             Dict with current weather conditions
         """
-        # Check cache (round to 2 decimals = ~1km precision)
-        cache_key = f"weather:current:{lat:.2f},{lon:.2f}"
-        cached = _weather_cache.get(cache_key)
-        if cached and (time() - cached["timestamp"] < _WEATHER_CACHE_TTL):
-            return cached["data"]
+        # Parse and normalize variables for cache key and API request
+        if variables:
+            # Split, strip whitespace, filter empty strings
+            current_vars = [v.strip() for v in variables.split(",") if v.strip()]
+            # De-duplicate while preserving order to avoid cache bloat and redundant API requests
+            seen = set()
+            current_vars = [v for v in current_vars if not (v in seen or seen.add(v))]
+            # If filtering/de-duplication resulted in empty list, fall back to defaults
+            if not current_vars:
+                variables = None
 
-        params = {
-            "latitude": lat,
-            "longitude": lon,
-            "current": [
+        # Use default variables if none provided or parsing resulted in empty list
+        if not variables:
+            current_vars = [
                 "temperature_2m",
                 "relative_humidity_2m",
                 "apparent_temperature",
@@ -50,7 +59,22 @@ class OpenMeteoService:
                 "wind_speed_10m",
                 "wind_direction_10m",
                 "wind_gusts_10m",
-            ],
+            ]
+            vars_key = "default"
+        else:
+            # Sort for cache normalization (temp,humidity = humidity,temp)
+            vars_key = ",".join(sorted(current_vars))
+
+        # Check cache (round to 2 decimals = ~1km precision)
+        cache_key = f"weather:current:{lat:.2f},{lon:.2f}:{vars_key}"
+        cached = _weather_cache.get(cache_key)
+        if cached and (time() - cached["timestamp"] < _WEATHER_CACHE_TTL):
+            return cached["data"]
+
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "current": current_vars,
             "timezone": "auto",
         }
 
@@ -65,23 +89,35 @@ class OpenMeteoService:
         data = response.json()
         current = data.get("current", {})
 
-        result = {
-            "status": "success",
-            "latitude": lat,
-            "longitude": lon,
-            "timezone": data.get("timezone"),
-            "current": {
-                "temperature_c": current.get("temperature_2m"),
-                "feels_like_c": current.get("apparent_temperature"),
-                "humidity_pct": current.get("relative_humidity_2m"),
-                "precipitation_mm": current.get("precipitation"),
-                "weather_code": current.get("weather_code"),
-                "wind_speed_kmh": current.get("wind_speed_10m"),
-                "wind_direction_deg": current.get("wind_direction_10m"),
-                "wind_gusts_kmh": current.get("wind_gusts_10m"),
-                "conditions": self._weather_code_to_text(current.get("weather_code")),
-            },
-        }
+        # If custom variables requested, return raw Open-Meteo format
+        if variables:
+            result = {
+                "status": "success",
+                "latitude": lat,
+                "longitude": lon,
+                "timezone": data.get("timezone"),
+                "current": current,
+                "current_units": data.get("current_units", {}),
+            }
+        else:
+            # Default variables: return transformed format for backward compatibility
+            result = {
+                "status": "success",
+                "latitude": lat,
+                "longitude": lon,
+                "timezone": data.get("timezone"),
+                "current": {
+                    "temperature_c": current.get("temperature_2m"),
+                    "feels_like_c": current.get("apparent_temperature"),
+                    "humidity_pct": current.get("relative_humidity_2m"),
+                    "precipitation_mm": current.get("precipitation"),
+                    "weather_code": current.get("weather_code"),
+                    "wind_speed_kmh": current.get("wind_speed_10m"),
+                    "wind_direction_deg": current.get("wind_direction_10m"),
+                    "wind_gusts_kmh": current.get("wind_gusts_10m"),
+                    "conditions": self._weather_code_to_text(current.get("weather_code")),
+                },
+            }
 
         # Store in cache
         if len(_weather_cache) >= _WEATHER_CACHE_MAX_SIZE:

@@ -14,15 +14,31 @@ router = APIRouter(prefix="/weather", tags=["weather"])
 async def get_current_weather(
     lat: Annotated[float, Query(ge=-90, le=90, description="Latitude")],
     lon: Annotated[float, Query(ge=-180, le=180, description="Longitude")],
+    variables: Annotated[
+        str | None,
+        Query(
+            description="Comma-separated list of Open-Meteo variable names (e.g., 'soil_moisture_0_to_1cm,temperature_2m'). If not provided, returns default variables."
+        ),
+    ] = None,
     _user: dict = require_auth,
 ):
     """
     Get current weather conditions at a location.
 
-    Returns temperature, humidity, wind speed/direction, and conditions.
+    Response format depends on whether custom variables are requested:
+
+    - **Without variables** (default): Returns transformed format with keys like
+      `temperature_c`, `humidity_pct`, `wind_speed_kmh` for backward compatibility.
+
+    - **With variables**: Returns raw Open-Meteo format with requested variable names
+      as keys (e.g., `soil_moisture_0_to_1cm`, `temperature_2m`). The response includes
+      `current` and `current_units` for proper interpretation.
+
+    See Open-Meteo documentation for available current weather variables:
+    https://open-meteo.com/en/docs
     """
     try:
-        result = await openmeteo_service.get_current_weather(lat, lon)
+        result = await openmeteo_service.get_current_weather(lat, lon, variables=variables)
         return result
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Weather API error: {str(e)}")
