@@ -479,7 +479,7 @@ class TestGetNDVI:
             lat=yosemite_coords["lat"],
             lon=yosemite_coords["lon"],
             size_km=5.0,
-            format="stats"
+            format="stats",
         )
 
         assert isinstance(result, dict)
@@ -500,9 +500,7 @@ class TestGetNDVI:
 
         mock_response = MagicMock()
         mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "401 Unauthorized",
-            request=MagicMock(),
-            response=MagicMock()
+            "401 Unauthorized", request=MagicMock(), response=MagicMock()
         )
 
         mock_client = AsyncMock()
@@ -517,7 +515,7 @@ class TestGetNDVI:
             lat=yosemite_coords["lat"],
             lon=yosemite_coords["lon"],
             size_km=5.0,
-            format="stats"
+            format="stats",
         )
 
         assert isinstance(result, dict)
@@ -550,7 +548,7 @@ class TestGetNDVI:
             lat=yosemite_coords["lat"],
             lon=yosemite_coords["lon"],
             size_km=5.0,
-            format="stats"
+            format="stats",
         )
 
         assert isinstance(result, dict)
@@ -767,7 +765,7 @@ class TestParameterValidation:
         mock_token_response = MagicMock()
         mock_token_response.json.return_value = {
             "access_token": "test_token",
-            "expires_in": 3600
+            "expires_in": 3600,
         }
         mock_token_response.raise_for_status = MagicMock()
 
@@ -776,10 +774,9 @@ class TestParameterValidation:
         mock_process_response.raise_for_status = MagicMock()
 
         mock_client = AsyncMock()
-        mock_client.post = AsyncMock(side_effect=[
-            mock_token_response,
-            mock_process_response
-        ])
+        mock_client.post = AsyncMock(
+            side_effect=[mock_token_response, mock_process_response]
+        )
         mock_client_class.return_value.__aenter__.return_value = mock_client
 
         params = {

@@ -3,9 +3,12 @@
 import httpx
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
+from jose import JWTError, jwt, jwk
 
 from ember.config import settings
+from ember.logging import get_logger
+
+logger = get_logger(__name__)
 
 security = HTTPBearer(auto_error=False)
 
@@ -103,33 +106,46 @@ async def verify_token(
     if settings.auth0_domain and settings.auth0_audience:
         try:
             jwks = await fetch_auth0_jwks()
-            signing_key = get_signing_key(token, jwks)
-            if signing_key:
+            signing_key_dict = get_signing_key(token, jwks)
+            if signing_key_dict:
+                # Construct RSA key from JWK
+                public_key = jwk.construct(signing_key_dict)
                 payload = jwt.decode(
                     token,
-                    signing_key,
+                    public_key,
                     algorithms=["RS256"],
                     audience=settings.auth0_audience,
                     issuer=f"https://{settings.auth0_domain}/",
                 )
                 return {**payload, "auth_type": "m2m"}
-        except Exception:
+        except JWTError:
+            # Auth0 token validation failed - fall through to try Supabase
+            pass
+        except Exception as e:
+            # Unexpected error (JWKS fetch, key construction, etc.)
+            logger.error(f"Auth0 validation error: {e}")
             pass  # Fall through to try Supabase
 
     # Try Supabase JWT
     try:
         # Existing Supabase validation logic (JWKS ES256 then HS256 fallback)
         if settings.supabase_jwks_url:
-            jwks = await fetch_jwks()
-            signing_key = get_signing_key(token, jwks)
-            if signing_key:
-                payload = jwt.decode(
-                    token,
-                    signing_key,
-                    algorithms=["ES256"],
-                    audience="authenticated",
-                )
-                return {**payload, "auth_type": "user"}
+            try:
+                jwks = await fetch_jwks()
+                signing_key_dict = get_signing_key(token, jwks)
+                if signing_key_dict:
+                    # Construct EC key from JWK
+                    public_key = jwk.construct(signing_key_dict)
+                    payload = jwt.decode(
+                        token,
+                        public_key,
+                        algorithms=["ES256"],
+                        audience="authenticated",
+                    )
+                    return {**payload, "auth_type": "user"}
+            except Exception as e:
+                # JWKS fetch or validation failed, try HS256 fallback
+                logger.error(f"Supabase JWKS validation error: {e}")
 
         if settings.supabase_jwt_secret:
             payload = jwt.decode(
