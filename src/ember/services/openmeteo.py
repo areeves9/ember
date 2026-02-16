@@ -8,6 +8,7 @@ import httpx
 from ember.config import settings
 
 OPENMETEO_BASE_URL = "https://api.open-meteo.com/v1/forecast"
+OPENMETEO_ARCHIVE_URL = "https://api.open-meteo.com/v1/archive"
 
 # Cache for weather queries (weather changes, but not per-second)
 _weather_cache: dict[str, dict] = {}
@@ -301,6 +302,202 @@ class OpenMeteoService:
         if len(_weather_cache) >= _WEATHER_CACHE_MAX_SIZE:
             _weather_cache.clear()
         _weather_cache[cache_key] = {"timestamp": time(), "data": result}
+
+        return result
+
+    async def get_historical_weather(
+        self, lat: float, lon: float, start_date: str, end_date: str
+    ) -> dict[str, Any]:
+        """
+        Get historical daily weather data for a date range.
+
+        Args:
+            lat: Latitude
+            lon: Longitude
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+
+        Returns:
+            Dict with daily historical weather data
+        """
+        # Validate date format (basic check)
+        from datetime import datetime
+        try:
+            datetime.strptime(start_date, "%Y-%m-%d")
+            datetime.strptime(end_date, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError("Dates must be in YYYY-MM-DD format")
+
+        # Check cache (historical data never changes, use permanent cache)
+        cache_key = f"weather:historical:{lat:.2f},{lon:.2f}:{start_date}:{end_date}"
+        cached = _weather_cache.get(cache_key)
+        if cached:  # No TTL check - historical data is permanent
+            return cached["data"]
+
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "start_date": start_date,
+            "end_date": end_date,
+            "daily": [
+                "temperature_2m_mean",
+                "temperature_2m_max",
+                "temperature_2m_min",
+                "relative_humidity_2m_mean",
+                "precipitation_sum",
+                "rain_sum",
+                "wind_speed_10m_max",
+            ],
+            "timezone": "UTC",
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                OPENMETEO_ARCHIVE_URL,  # Uses /v1/archive
+                params=params,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+
+        data = response.json()
+        daily = data.get("daily", {})
+
+        # Build daily records list
+        dates = daily.get("time", [])
+        temp_means = daily.get("temperature_2m_mean", [])
+        temp_maxs = daily.get("temperature_2m_max", [])
+        temp_mins = daily.get("temperature_2m_min", [])
+        humidities = daily.get("relative_humidity_2m_mean", [])
+        precips = daily.get("precipitation_sum", [])
+        rains = daily.get("rain_sum", [])
+        winds = daily.get("wind_speed_10m_max", [])
+
+        daily_records = []
+        for i, date in enumerate(dates):
+            daily_records.append({
+                "date": date,
+                "temperature_mean_c": temp_means[i] if i < len(temp_means) else None,
+                "temperature_max_c": temp_maxs[i] if i < len(temp_maxs) else None,
+                "temperature_min_c": temp_mins[i] if i < len(temp_mins) else None,
+                "humidity_pct": humidities[i] if i < len(humidities) else None,
+                "precipitation_sum_mm": precips[i] if i < len(precips) else None,
+                "rain_sum_mm": rains[i] if i < len(rains) else None,
+                "wind_speed_max_kmh": winds[i] if i < len(winds) else None,
+            })
+
+        result = {
+            "status": "success",
+            "latitude": lat,
+            "longitude": lon,
+            "start_date": start_date,
+            "end_date": end_date,
+            "timezone": data.get("timezone"),
+            "daily": daily_records,
+            "days_count": len(daily_records),
+        }
+
+        # Store in cache permanently (historical data never changes)
+        if len(_weather_cache) >= _WEATHER_CACHE_MAX_SIZE:
+            _weather_cache.clear()
+        _weather_cache[cache_key] = {"data": result}  # No timestamp - permanent
+
+        return result
+
+    async def get_hourly_historical_weather(
+        self, lat: float, lon: float, start_date: str, end_date: str
+    ) -> dict[str, Any]:
+        """
+        Get historical hourly weather data for a date range.
+
+        Args:
+            lat: Latitude
+            lon: Longitude
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+
+        Returns:
+            Dict with hourly historical weather data
+        """
+        # Validate date format (basic check)
+        from datetime import datetime
+        try:
+            datetime.strptime(start_date, "%Y-%m-%d")
+            datetime.strptime(end_date, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError("Dates must be in YYYY-MM-DD format")
+
+        # Check cache (historical data never changes, use permanent cache)
+        cache_key = f"weather:historical:hourly:{lat:.2f},{lon:.2f}:{start_date}:{end_date}"
+        cached = _weather_cache.get(cache_key)
+        if cached:  # No TTL check - historical data is permanent
+            return cached["data"]
+
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "start_date": start_date,
+            "end_date": end_date,
+            "hourly": [
+                "temperature_2m",
+                "relative_humidity_2m",
+                "precipitation",
+                "wind_speed_10m",
+                "wind_direction_10m",
+                "wind_gusts_10m",
+                "apparent_temperature",
+            ],
+            "timezone": "UTC",
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                OPENMETEO_ARCHIVE_URL,  # Uses /v1/archive
+                params=params,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+
+        data = response.json()
+        hourly = data.get("hourly", {})
+
+        # Build hourly records list
+        timestamps = hourly.get("time", [])
+        temps = hourly.get("temperature_2m", [])
+        humidities = hourly.get("relative_humidity_2m", [])
+        precips = hourly.get("precipitation", [])
+        wind_speeds = hourly.get("wind_speed_10m", [])
+        wind_dirs = hourly.get("wind_direction_10m", [])
+        wind_gusts = hourly.get("wind_gusts_10m", [])
+        apparent_temps = hourly.get("apparent_temperature", [])
+
+        hourly_records = []
+        for i, timestamp in enumerate(timestamps):
+            hourly_records.append({
+                "timestamp": timestamp,
+                "temperature_c": temps[i] if i < len(temps) else None,
+                "humidity_pct": humidities[i] if i < len(humidities) else None,
+                "precipitation_mm": precips[i] if i < len(precips) else None,
+                "wind_speed_kmh": wind_speeds[i] if i < len(wind_speeds) else None,
+                "wind_direction_deg": wind_dirs[i] if i < len(wind_dirs) else None,
+                "wind_gusts_kmh": wind_gusts[i] if i < len(wind_gusts) else None,
+                "feels_like_c": apparent_temps[i] if i < len(apparent_temps) else None,
+            })
+
+        result = {
+            "status": "success",
+            "latitude": lat,
+            "longitude": lon,
+            "start_date": start_date,
+            "end_date": end_date,
+            "timezone": data.get("timezone"),
+            "hourly_history": hourly_records,
+            "total_hours": len(hourly_records),
+        }
+
+        # Store in cache permanently (historical data never changes)
+        if len(_weather_cache) >= _WEATHER_CACHE_MAX_SIZE:
+            _weather_cache.clear()
+        _weather_cache[cache_key] = {"data": result}  # No timestamp - permanent
 
         return result
 
