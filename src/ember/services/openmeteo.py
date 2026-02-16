@@ -37,18 +37,16 @@ class OpenMeteoService:
         Returns:
             Dict with current weather conditions
         """
-        # Check cache (round to 2 decimals = ~1km precision)
-        # Include variables in cache key to avoid conflicts
-        cache_key = f"weather:current:{lat:.2f},{lon:.2f}:{variables or 'default'}"
-        cached = _weather_cache.get(cache_key)
-        if cached and (time() - cached["timestamp"] < _WEATHER_CACHE_TTL):
-            return cached["data"]
-
-        # Use custom variables or default list
+        # Parse and normalize variables for cache key and API request
         if variables:
-            # Split comma-separated variables and strip whitespace
-            current_vars = [v.strip() for v in variables.split(",")]
-        else:
+            # Split, strip whitespace, filter empty strings, and sort for cache normalization
+            current_vars = [v.strip() for v in variables.split(",") if v.strip()]
+            # If filtering resulted in empty list, fall back to defaults
+            if not current_vars:
+                variables = None
+
+        # Use default variables if none provided or parsing resulted in empty list
+        if not variables:
             current_vars = [
                 "temperature_2m",
                 "relative_humidity_2m",
@@ -59,6 +57,16 @@ class OpenMeteoService:
                 "wind_direction_10m",
                 "wind_gusts_10m",
             ]
+            vars_key = "default"
+        else:
+            # Sort for cache normalization (temp,humidity = humidity,temp)
+            vars_key = ",".join(sorted(current_vars))
+
+        # Check cache (round to 2 decimals = ~1km precision)
+        cache_key = f"weather:current:{lat:.2f},{lon:.2f}:{vars_key}"
+        cached = _weather_cache.get(cache_key)
+        if cached and (time() - cached["timestamp"] < _WEATHER_CACHE_TTL):
+            return cached["data"]
 
         params = {
             "latitude": lat,
