@@ -130,18 +130,22 @@ async def verify_token(
     try:
         # Existing Supabase validation logic (JWKS ES256 then HS256 fallback)
         if settings.supabase_jwks_url:
-            jwks = await fetch_jwks()
-            signing_key_dict = get_signing_key(token, jwks)
-            if signing_key_dict:
-                # Construct EC key from JWK
-                public_key = jwk.construct(signing_key_dict)
-                payload = jwt.decode(
-                    token,
-                    public_key,
-                    algorithms=["ES256"],
-                    audience="authenticated",
-                )
-                return {**payload, "auth_type": "user"}
+            try:
+                jwks = await fetch_jwks()
+                signing_key_dict = get_signing_key(token, jwks)
+                if signing_key_dict:
+                    # Construct EC key from JWK
+                    public_key = jwk.construct(signing_key_dict)
+                    payload = jwt.decode(
+                        token,
+                        public_key,
+                        algorithms=["ES256"],
+                        audience="authenticated",
+                    )
+                    return {**payload, "auth_type": "user"}
+            except Exception as e:
+                # JWKS fetch or validation failed, try HS256 fallback
+                logger.error(f"Supabase JWKS validation error: {e}")
 
         if settings.supabase_jwt_secret:
             payload = jwt.decode(
