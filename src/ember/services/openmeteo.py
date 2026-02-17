@@ -341,7 +341,7 @@ class OpenMeteoService:
             "longitude": lon,
             "start_date": start_date,
             "end_date": end_date,
-            "daily": [
+            "daily": ",".join([
                 "temperature_2m_mean",
                 "temperature_2m_max",
                 "temperature_2m_min",
@@ -349,7 +349,7 @@ class OpenMeteoService:
                 "precipitation_sum",
                 "rain_sum",
                 "wind_speed_10m_max",
-            ],
+            ]),
             "timezone": "UTC",
         }
 
@@ -439,7 +439,7 @@ class OpenMeteoService:
             "longitude": lon,
             "start_date": start_date,
             "end_date": end_date,
-            "hourly": [
+            "hourly": ",".join([
                 "temperature_2m",
                 "relative_humidity_2m",
                 "precipitation",
@@ -447,7 +447,7 @@ class OpenMeteoService:
                 "wind_direction_10m",
                 "wind_gusts_10m",
                 "apparent_temperature",
-            ],
+            ]),
             "timezone": "UTC",
         }
 

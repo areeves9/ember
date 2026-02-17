@@ -21,6 +21,7 @@ dependencies = [
     "rasterio>=1.4.0",
     "rio-tiler>=7.0.0",
     "rio-cogeo>=7.0.1",
+    "boto3>=1.42.50",
 ]
 
 [build-system]
