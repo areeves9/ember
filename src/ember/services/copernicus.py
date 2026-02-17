@@ -630,8 +630,8 @@ class CopernicusService:
                     result["latitude"] = lat
                     result["longitude"] = lon
 
-            else:  # format == "raster"
-                raster_b64 = base64.b64encode(geotiff_data).decode("utf-8")
+            elif format == "raster":  # GeoTIFF
+                raster_b64 = base64.b64encode(image_data).decode("utf-8")
 
                 result = {
                     "status": "success",
