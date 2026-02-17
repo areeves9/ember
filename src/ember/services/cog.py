@@ -76,6 +76,7 @@ class COGService:
         lat: float,
         lon: float,
         band: int = 1,
+        timeout: int = 10,
     ) -> dict[str, Any]:
         """
         Query raster value at a single point.
@@ -87,11 +88,15 @@ class COGService:
             lat: Latitude (WGS84)
             lon: Longitude (WGS84)
             band: Band index (1-based, default 1)
+            timeout: Timeout in seconds for S3 reads (default 10)
 
         Returns:
             Dict with pixel value and metadata
         """
         try:
+            # Configure GDAL timeout for this query
+            os.environ["GDAL_HTTP_TIMEOUT"] = str(timeout)
+
             with Reader(self.cog_url) as src:
                 # Get raster info
                 info = src.info()

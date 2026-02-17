@@ -106,6 +106,7 @@ class CopernicusService:
         evalscript: str,
         width: int,
         height: int,
+        output_format: str = "image/tiff",
     ) -> bytes:
         """Call Copernicus Sentinel Hub Process API."""
         token = await self._get_token()
@@ -129,7 +130,7 @@ class CopernicusService:
                 "width": width,
                 "height": height,
                 "responses": [
-                    {"identifier": "default", "format": {"type": "image/tiff"}}
+                    {"identifier": "default", "format": {"type": output_format}}
                 ],
             },
             "evalscript": evalscript,
@@ -202,10 +203,10 @@ class CopernicusService:
             }
 
         # Validate format parameter
-        if format not in ["stats", "raster"]:
+        if format not in ["stats", "raster", "png"]:
             return {
                 "status": "error",
-                "message": "Invalid format. Must be 'stats' or 'raster'",
+                "message": "Invalid format. Must be 'stats', 'raster', or 'png'",
             }
 
         # Validate parameter combinations
@@ -323,16 +324,21 @@ class CopernicusService:
         """
 
         try:
+            # Determine output format for Copernicus API
+            output_format = "image/png" if format == "png" else "image/tiff"
+
             # Call Copernicus Process API
-            geotiff_data = await self._call_process_api(
-                bbox, start_date, end_date, evalscript, width, height
+            image_data = await self._call_process_api(
+                bbox, start_date, end_date, evalscript, width, height, output_format
             )
 
-            # Parse GeoTIFF and compute statistics
-            with rasterio.open(io.BytesIO(geotiff_data)) as src:
-                raster_data = src.read(1)
+            # For stats, we need GeoTIFF - if PNG requested, fetch GeoTIFF separately
+            if format == "stats" or format == "raster":
+                # Parse GeoTIFF and compute statistics
+                with rasterio.open(io.BytesIO(image_data)) as src:
+                    raster_data = src.read(1)
 
-            stats = self._compute_stats_from_raster(raster_data)
+                stats = self._compute_stats_from_raster(raster_data)
 
             if format == "stats":
                 result = {
@@ -355,8 +361,8 @@ class CopernicusService:
                     result["latitude"] = lat
                     result["longitude"] = lon
 
-            else:  # format == "raster"
-                raster_b64 = base64.b64encode(geotiff_data).decode("utf-8")
+            elif format == "raster":  # GeoTIFF
+                raster_b64 = base64.b64encode(image_data).decode("utf-8")
 
                 result = {
                     "status": "success",
@@ -372,6 +378,30 @@ class CopernicusService:
                         "mean": round(stats["mean"], 3),
                         "min": round(stats["min"], 3),
                         "max": round(stats["max"], 3),
+                    },
+                    "source": "Sentinel-2 L2A",
+                    "date_range": {
+                        "start": start_date,
+                        "end": end_date,
+                    },
+                }
+
+                if lat is not None and lon is not None:
+                    result["latitude"] = lat
+                    result["longitude"] = lon
+
+            else:  # format == "png"
+                png_b64 = base64.b64encode(image_data).decode("utf-8")
+
+                result = {
+                    "status": "success",
+                    "bbox": bbox,
+                    "raster": {
+                        "format": "image/png",
+                        "encoding": "base64",
+                        "data": png_b64,
+                        "width": width,
+                        "height": height,
                     },
                     "source": "Sentinel-2 L2A",
                     "date_range": {
@@ -447,10 +477,10 @@ class CopernicusService:
             }
 
         # Validate format parameter
-        if format not in ["stats", "raster"]:
+        if format not in ["stats", "raster", "png"]:
             return {
                 "status": "error",
-                "message": "Invalid format. Must be 'stats' or 'raster'",
+                "message": "Invalid format. Must be 'stats', 'raster', or 'png'",
             }
 
         # Validate parameter combinations
@@ -619,6 +649,30 @@ class CopernicusService:
                         "max": round(stats["max"], 3),
                         "moisture_status": self._ndmi_to_moisture_status(stats["mean"]),
                         "fire_risk": self._ndmi_to_fire_risk(stats["mean"]),
+                    },
+                    "source": "Sentinel-2 L2A",
+                    "date_range": {
+                        "start": start_date,
+                        "end": end_date,
+                    },
+                }
+
+                if lat is not None and lon is not None:
+                    result["latitude"] = lat
+                    result["longitude"] = lon
+
+            else:  # format == "png"
+                png_b64 = base64.b64encode(image_data).decode("utf-8")
+
+                result = {
+                    "status": "success",
+                    "bbox": bbox,
+                    "raster": {
+                        "format": "image/png",
+                        "encoding": "base64",
+                        "data": png_b64,
+                        "width": width,
+                        "height": height,
                     },
                     "source": "Sentinel-2 L2A",
                     "date_range": {

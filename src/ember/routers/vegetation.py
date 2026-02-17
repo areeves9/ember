@@ -50,7 +50,7 @@ async def get_ndvi(
         Query(description="End date YYYY-MM-DD", pattern=r"^\d{4}-\d{2}-\d{2}$"),
     ] = None,
     format: Annotated[
-        str, Query(description="Response format: 'stats' or 'raster'")
+        str, Query(description="Response format: 'stats', 'raster' (GeoTIFF), or 'png'")
     ] = "stats",
     _user: dict = require_auth,
 ):
@@ -75,9 +75,9 @@ async def get_ndvi(
     - Set format='raster' for GeoTIFF base64 response
     """
     # Validate format parameter
-    if format not in ["stats", "raster"]:
+    if format not in ["stats", "raster", "png"]:
         raise HTTPException(
-            status_code=400, detail="Invalid format. Must be 'stats' or 'raster'"
+            status_code=400, detail="Invalid format. Must be 'stats', 'raster', or 'png'"
         )
 
     # Validate bbox coordinates if provided
@@ -162,7 +162,7 @@ async def get_ndmi(
         Query(description="End date YYYY-MM-DD", pattern=r"^\d{4}-\d{2}-\d{2}$"),
     ] = None,
     format: Annotated[
-        str, Query(description="Response format: 'stats' or 'raster'")
+        str, Query(description="Response format: 'stats', 'raster' (GeoTIFF), or 'png'")
     ] = "stats",
     _user: dict = require_auth,
 ):
@@ -185,9 +185,9 @@ async def get_ndmi(
     - Set format='raster' for GeoTIFF base64 response
     """
     # Validate format parameter
-    if format not in ["stats", "raster"]:
+    if format not in ["stats", "raster", "png"]:
         raise HTTPException(
-            status_code=400, detail="Invalid format. Must be 'stats' or 'raster'"
+            status_code=400, detail="Invalid format. Must be 'stats', 'raster', or 'png'"
         )
 
     # Validate bbox coordinates if provided
