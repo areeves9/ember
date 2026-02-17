@@ -155,6 +155,7 @@ class OpenMeteoService:
             "daily": [
                 "temperature_2m_max",
                 "temperature_2m_min",
+                "precipitation_sum",
                 "precipitation_probability_max",
                 "wind_speed_10m_max",
                 "wind_direction_10m_dominant",
@@ -184,7 +185,8 @@ class OpenMeteoService:
                     "date": date,
                     "temp_max_c": daily.get("temperature_2m_max", [None])[i],
                     "temp_min_c": daily.get("temperature_2m_min", [None])[i],
-                    "precip_probability_pct": daily.get(
+                    "precipitation_mm": daily.get("precipitation_sum", [None])[i],
+                    "precipitation_probability_pct": daily.get(
                         "precipitation_probability_max", [None]
                     )[i],
                     "wind_speed_max_kmh": daily.get("wind_speed_10m_max", [None])[i],
