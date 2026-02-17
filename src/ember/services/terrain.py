@@ -12,8 +12,6 @@ from time import time
 from typing import Any
 
 import rasterio
-from rasterio.windows import from_bounds
-from rasterio.warp import reproject, Resampling
 from rio_tiler.io import Reader
 
 from ember.config import settings
@@ -281,6 +279,20 @@ class TerrainService:
         Returns:
             Dict with base64-encoded GeoTIFF and metadata
         """
+        # Validate bbox coordinates
+        if min_lat >= max_lat or min_lon >= max_lon:
+            return {
+                "status": "error",
+                "message": "Invalid bbox: min values must be less than max values",
+            }
+
+        # Check bbox size to prevent memory issues
+        if (max_lat - min_lat) > 10 or (max_lon - min_lon) > 10:
+            return {
+                "status": "error",
+                "message": "Bbox too large (max 10 degrees per dimension)",
+            }
+
         if layer not in self._layer_urls:
             return {
                 "status": "error",
@@ -290,7 +302,7 @@ class TerrainService:
         url = self._layer_urls[layer]
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
                 self._executor,
                 self._read_bbox_raster,
@@ -384,19 +396,14 @@ class TerrainService:
             b64_data = base64.b64encode(buffer.read()).decode('utf-8')
 
             # Get stats for the data
-            # Handle nodata values if present in the dataset
-            nodata = None
-            if hasattr(img, 'nodata') and img.nodata is not None:
-                nodata = img.nodata
-            elif hasattr(data, 'mask') and data.mask is not None:
-                # Use mask if available
-                valid_data = data[data.mask]
-            else:
-                valid_data = data
-            
-            # Filter out nodata values if they exist
-            if nodata is not None:
-                valid_data = data[data != nodata]
+            # Initialize valid_data first
+            valid_data = data.flatten()
+
+            # Handle nodata/mask
+            if hasattr(info, 'nodata') and info.nodata is not None:
+                valid_data = valid_data[valid_data != info.nodata]
+            elif hasattr(data, 'mask') and data.mask is not False:
+                valid_data = data.compressed()
 
             return {
                 "status": "success",
