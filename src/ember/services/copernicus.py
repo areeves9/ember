@@ -597,16 +597,21 @@ class CopernicusService:
         """
 
         try:
+            # Determine output format for Copernicus API
+            output_format = "image/png" if format == "png" else "image/tiff"
+
             # Call Copernicus Process API
-            geotiff_data = await self._call_process_api(
-                bbox, start_date, end_date, evalscript, width, height
+            image_data = await self._call_process_api(
+                bbox, start_date, end_date, evalscript, width, height, output_format
             )
 
-            # Parse GeoTIFF and compute statistics
-            with rasterio.open(io.BytesIO(geotiff_data)) as src:
-                raster_data = src.read(1)
+            # For stats, we need GeoTIFF - if PNG requested, fetch GeoTIFF separately
+            if format == "stats" or format == "raster":
+                # Parse GeoTIFF and compute statistics
+                with rasterio.open(io.BytesIO(image_data)) as src:
+                    raster_data = src.read(1)
 
-            stats = self._compute_stats_from_raster(raster_data)
+                stats = self._compute_stats_from_raster(raster_data)
 
             if format == "stats":
                 result = {
