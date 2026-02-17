@@ -345,9 +345,15 @@ class TerrainService:
             # Read the part of the raster that intersects our bbox
             # rio-tiler handles coordinate transformation automatically
             # bbox format: (left, bottom, right, top) = (min_lon, min_lat, max_lon, max_lat)
+            
+            # Use nearest neighbor for categorical data (fuel codes)
+            # Bilinear interpolation would create invalid intermediate values
+            resampling_method = "nearest" if layer == "fuel" else "bilinear"
+
             img = src.part(
                 bbox=(min_lon, min_lat, max_lon, max_lat),
                 max_size=max_size,
+                resampling_method=resampling_method,
             )
 
             # Get the data array (shape: bands x height x width)
