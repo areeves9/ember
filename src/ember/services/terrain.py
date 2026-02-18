@@ -26,6 +26,12 @@ _terrain_cache: dict[str, dict] = {}
 _CACHE_TTL_SECONDS = 1800  # 30 minutes
 _CACHE_MAX_SIZE = 1000  # Max entries before purge
 
+# Raster cache - separate from point cache due to larger payloads
+_raster_cache: dict[str, dict] = {}
+_RASTER_CACHE_TTL_SECONDS = 86400  # 24 hours (LANDFIRE data is static)
+_RASTER_CACHE_MAX_SIZE = 100  # Fewer entries (larger payloads)
+_RASTER_CACHE_MAX_MEMORY_MB = 500  # Approximate memory limit
+
 # Layer name -> file pattern mapping
 # Pattern matches: LC{YY}_{PATTERN}_{RES}.tif
 LAYER_PATTERNS = {
@@ -87,6 +93,56 @@ FUEL_CODES = {
     203: "SB3",
     204: "SB4",
 }
+
+
+def _raster_cache_key(
+    layer: str,
+    min_lat: float,
+    max_lat: float,
+    min_lon: float,
+    max_lon: float,
+    max_size: int,
+) -> str:
+    """
+    Generate cache key for raster query.
+    
+    Rounds coordinates to 3 decimals (~110m) to improve cache hits
+    when viewport shifts slightly.
+    """
+    r = lambda x: round(x, 3)
+    return f"raster:{layer}:{r(min_lat)},{r(max_lat)},{r(min_lon)},{r(max_lon)}:{max_size}"
+
+
+def _get_cached_raster(key: str) -> dict | None:
+    """Get raster from cache if still valid."""
+    entry = _raster_cache.get(key)
+    if not entry:
+        return None
+    
+    if time() - entry["timestamp"] > _RASTER_CACHE_TTL_SECONDS:
+        del _raster_cache[key]
+        return None
+    
+    return entry["data"]
+
+
+def _cache_raster(key: str, data: dict) -> None:
+    """Store raster in cache with size management."""
+    # Simple size management: clear if too many entries
+    if len(_raster_cache) >= _RASTER_CACHE_MAX_SIZE:
+        # Remove oldest entries (simple LRU approximation)
+        sorted_entries = sorted(
+            _raster_cache.items(),
+            key=lambda x: x[1]["timestamp"]
+        )
+        # Remove oldest 20%
+        for key_to_remove, _ in sorted_entries[:len(sorted_entries) // 5]:
+            del _raster_cache[key_to_remove]
+    
+    _raster_cache[key] = {
+        "timestamp": time(),
+        "data": data,
+    }
 
 
 class TerrainService:
@@ -267,6 +323,7 @@ class TerrainService:
     ) -> dict[str, Any]:
         """
         Query terrain layer as a raster for a bounding box.
+        Results are cached for 24 hours.
 
         Args:
             min_lat: South boundary
@@ -321,6 +378,15 @@ class TerrainService:
 
         url = self._layer_urls[layer]
 
+        # Check cache first
+        cache_key = _raster_cache_key(layer, min_lat, max_lat, min_lon, max_lon, max_size)
+        cached = _get_cached_raster(cache_key)
+        if cached:
+            logger.debug(f"Raster cache hit: {cache_key}")
+            return cached
+        
+        logger.debug(f"Raster cache miss: {cache_key}")
+
         try:
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
@@ -334,6 +400,11 @@ class TerrainService:
                 layer,
                 max_size,
             )
+            
+            # Cache successful results
+            if result.get("status") == "success":
+                _cache_raster(cache_key, result)
+            
             return result
         except Exception as e:
             logger.error(f"Bbox raster query failed for {layer}: {e}", exc_info=True)
