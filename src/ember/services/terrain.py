@@ -279,6 +279,26 @@ class TerrainService:
         Returns:
             Dict with base64-encoded GeoTIFF and metadata
         """
+        # Validate max_size parameter
+        if max_size <= 0 or max_size > 2048:
+            return {
+                "status": "error",
+                "message": "max_size must be between 1 and 2048",
+            }
+
+        # Validate coordinate ranges
+        if not (-90 <= min_lat <= max_lat <= 90):
+            return {
+                "status": "error",
+                "message": "Latitude values must be between -90 and 90",
+            }
+
+        if not (-180 <= min_lon <= max_lon <= 180):
+            return {
+                "status": "error",
+                "message": "Longitude values must be between -180 and 180",
+            }
+
         # Validate bbox coordinates
         if min_lat >= max_lat or min_lon >= max_lon:
             return {
@@ -319,7 +339,7 @@ class TerrainService:
             logger.error(f"Bbox raster query failed for {layer}: {e}", exc_info=True)
             return {
                 "status": "error",
-                "message": f"Raster query failed: {str(e)}",
+                "message": "Failed to query terrain raster. Please check coordinates and try again.",
             }
 
     def _read_bbox_raster(
@@ -411,6 +431,13 @@ class TerrainService:
             elif hasattr(data, 'mask') and data.mask is not False:
                 valid_data = data.compressed()
 
+            # Return no_data status if all values are invalid/masked
+            if valid_data.size == 0:
+                return {
+                    "status": "no_data",
+                    "message": "No valid data in requested region",
+                }
+
             return {
                 "status": "success",
                 "layer": layer,
@@ -423,9 +450,9 @@ class TerrainService:
                     "height": height,
                 },
                 "stats": {
-                    "min": float(valid_data.min()) if valid_data.size > 0 else None,
-                    "max": float(valid_data.max()) if valid_data.size > 0 else None,
-                    "mean": float(valid_data.mean()) if valid_data.size > 0 else None,
+                    "min": float(valid_data.min()),
+                    "max": float(valid_data.max()),
+                    "mean": float(valid_data.mean()),
                 },
             }
 
