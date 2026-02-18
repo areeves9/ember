@@ -38,6 +38,15 @@ class TestTerrainRouterValidation:
         assert response.status_code == 400
         assert "Must provide either" in response.json()["detail"]
 
+    def test_partial_bbox_parameters_returns_400(self, client):
+        """Partial bbox parameters should return helpful error message."""
+        # Missing max_lon
+        response = client.get("/api/v1/terrain?min_lat=34.0&max_lat=34.5&min_lon=-118.5")
+        assert response.status_code == 400
+        assert "Incomplete bbox" in response.json()["detail"]
+        assert "max_lon" in response.json()["detail"]
+        assert "All four bbox parameters required" in response.json()["detail"]
+
     def test_mixing_point_and_bbox_returns_400(self, client):
         """Mixing point and bbox params should return 400."""
         response = client.get("/api/v1/terrain?lat=34.0&lon=-118.0&min_lat=34.0&max_lat=34.5&min_lon=-118.5&max_lon=-118.0")

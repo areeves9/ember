@@ -48,12 +48,27 @@ async def get_terrain(
     # Determine query mode
     has_point = lat is not None and lon is not None
     has_bbox = all(v is not None for v in [min_lat, max_lat, min_lon, max_lon])
+    
+    # Check for partial bbox parameters
+    has_partial_bbox = any(v is not None for v in [min_lat, max_lat, min_lon, max_lon])
 
     if not has_point and not has_bbox:
-        raise HTTPException(
-            status_code=400,
-            detail="Must provide either (lat, lon) for point query or (min_lat, max_lat, min_lon, max_lon) for bbox query",
-        )
+        if has_partial_bbox:
+            # Helpful error for incomplete bbox
+            missing_params = []
+            if min_lat is None: missing_params.append("min_lat")
+            if max_lat is None: missing_params.append("max_lat")
+            if min_lon is None: missing_params.append("min_lon")
+            if max_lon is None: missing_params.append("max_lon")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Incomplete bbox: missing parameters {', '.join(missing_params)}. All four bbox parameters required.",
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Must provide either (lat, lon) for point query or (min_lat, max_lat, min_lon, max_lon) for bbox query",
+            )
 
     if has_point and has_bbox:
         raise HTTPException(
@@ -102,6 +117,8 @@ async def get_terrain(
             )
             return result
         except Exception as e:
+            # Note: Service layer returns generic error messages, so this is safe
+            # If service layer changes, may want to log details without exposing to client
             raise HTTPException(status_code=502, detail=f"Terrain raster query failed: {str(e)}")
 
     # Handle bbox JSON query (stats only, no raster)
