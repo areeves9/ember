@@ -5,9 +5,14 @@ for fire behavior modeling.
 """
 
 import asyncio
+import base64
+import io
 from concurrent.futures import ThreadPoolExecutor
 from time import time
 from typing import Any
+
+import rasterio
+from rio_tiler.io import Reader
 
 from ember.config import settings
 from ember.logging import get_logger
@@ -250,6 +255,206 @@ class TerrainService:
         directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW", "N"]
         idx = int((degrees + 22.5) / 45)
         return directions[idx]
+
+    async def query_terrain_bbox_raster(
+        self,
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+        layer: str,
+        max_size: int = 512,
+    ) -> dict[str, Any]:
+        """
+        Query terrain layer as a raster for a bounding box.
+
+        Args:
+            min_lat: South boundary
+            max_lat: North boundary
+            min_lon: West boundary
+            max_lon: East boundary
+            layer: Layer name (elevation, slope, aspect, fuel, etc.)
+            max_size: Maximum dimension for output raster (default 512px)
+
+        Returns:
+            Dict with base64-encoded GeoTIFF and metadata
+        """
+        # Validate max_size parameter
+        if max_size <= 0 or max_size > 2048:
+            return {
+                "status": "error",
+                "message": "max_size must be between 1 and 2048",
+            }
+
+        # Validate coordinate ranges
+        if not (-90 <= min_lat <= max_lat <= 90):
+            return {
+                "status": "error",
+                "message": "Latitude values must be between -90 and 90",
+            }
+
+        if not (-180 <= min_lon <= max_lon <= 180):
+            return {
+                "status": "error",
+                "message": "Longitude values must be between -180 and 180",
+            }
+
+        # Validate bbox coordinates
+        if min_lat >= max_lat or min_lon >= max_lon:
+            return {
+                "status": "error",
+                "message": "Invalid bbox: min values must be less than max values",
+            }
+
+        # Check bbox size to prevent memory issues
+        if (max_lat - min_lat) > 10 or (max_lon - min_lon) > 10:
+            return {
+                "status": "error",
+                "message": "Bbox too large (max 10 degrees per dimension)",
+            }
+
+        if layer not in self._layer_urls:
+            return {
+                "status": "error",
+                "message": f"Layer '{layer}' not available. Available: {self.available_layers}",
+            }
+
+        url = self._layer_urls[layer]
+
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                self._executor,
+                self._read_bbox_raster,
+                url,
+                min_lat,
+                max_lat,
+                min_lon,
+                max_lon,
+                layer,
+                max_size,
+            )
+            return result
+        except Exception as e:
+            logger.error(f"Bbox raster query failed for {layer}: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "message": "Failed to query terrain raster. Please check coordinates and try again.",
+            }
+
+    def _read_bbox_raster(
+        self,
+        url: str,
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+        layer: str,
+        max_size: int,
+    ) -> dict[str, Any]:
+        """
+        Read raster data for bbox (runs in thread pool).
+
+        Uses rio-tiler's Reader for efficient COG reading with
+        HTTP range requests.
+        """
+        with Reader(url) as src:
+            # Get raster bounds and check intersection
+            info = src.info()
+
+            # Read the part of the raster that intersects our bbox
+            # rio-tiler handles coordinate transformation automatically
+            # bbox format: (left, bottom, right, top) = (min_lon, min_lat, max_lon, max_lat)
+            
+            # Use nearest neighbor for categorical data (fuel codes)
+            # Bilinear interpolation would create invalid intermediate values
+            resampling_method = "nearest" if layer == "fuel" else "bilinear"
+
+            img = src.part(
+                bbox=(min_lon, min_lat, max_lon, max_lat),
+                max_size=max_size,
+                resampling_method=resampling_method,
+            )
+
+            # Get the data array (shape: bands x height x width)
+            data = img.data
+
+            if data.size == 0:
+                return {
+                    "status": "no_data",
+                    "message": "No data in requested region",
+                }
+
+            # Create in-memory GeoTIFF
+            buffer = io.BytesIO()
+
+            # Get the actual bounds of the returned data
+            actual_bounds = img.bounds
+
+            # Calculate transform for the output raster
+            height, width = data.shape[1], data.shape[2]
+            transform = rasterio.transform.from_bounds(
+                actual_bounds.left,
+                actual_bounds.bottom,
+                actual_bounds.right,
+                actual_bounds.top,
+                width,
+                height,
+            )
+
+            # Write to in-memory GeoTIFF
+            with rasterio.open(
+                buffer,
+                'w',
+                driver='GTiff',
+                height=height,
+                width=width,
+                count=1,
+                dtype=data.dtype,
+                crs='EPSG:4326',
+                transform=transform,
+                compress='lzw',
+            ) as dst:
+                dst.write(data[0], 1)  # Write first band
+
+            # Encode as base64
+            buffer.seek(0)
+            b64_data = base64.b64encode(buffer.read()).decode('utf-8')
+
+            # Get stats for the data
+            # Initialize valid_data first
+            valid_data = data.flatten()
+
+            # Handle nodata/mask
+            if hasattr(info, 'nodata') and info.nodata is not None:
+                valid_data = valid_data[valid_data != info.nodata]
+            elif hasattr(data, 'mask') and data.mask is not False:
+                valid_data = data.compressed()
+
+            # Return no_data status if all values are invalid/masked
+            if valid_data.size == 0:
+                return {
+                    "status": "no_data",
+                    "message": "No valid data in requested region",
+                }
+
+            return {
+                "status": "success",
+                "layer": layer,
+                "bbox": [min_lon, min_lat, max_lon, max_lat],
+                "raster": {
+                    "format": "geotiff",
+                    "encoding": "base64",
+                    "data": b64_data,
+                    "width": width,
+                    "height": height,
+                },
+                "stats": {
+                    "min": float(valid_data.min()),
+                    "max": float(valid_data.max()),
+                    "mean": float(valid_data.mean()),
+                },
+            }
 
     @property
     def available_layers(self) -> list[str]:
