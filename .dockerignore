@@ -26,3 +26,7 @@ htmlcov/
 # Docs (except README.md needed for build)
 *.md
 !README.md
+
+# Gemini AI
+.gemini/
+

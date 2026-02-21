@@ -13,3 +13,7 @@ wheels/
 .env
 .env.local
 .env.*.local
+
+# Gemini AI
+.gemini/
+
