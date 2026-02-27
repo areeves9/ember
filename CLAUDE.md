@@ -4,22 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Ember is a wildfire data API proxy that integrates with NASA FIRMS, OpenMeteo, Copernicus, LANDFIRE, and Nominatim. It serves as the backend for the Nova frontend. Built with Python 3.13, FastAPI, and async/await patterns.
+Ember is a wildfire data API proxy that integrates with NASA FIRMS, OpenMeteo, Copernicus, LANDFIRE, and Nominatim. It serves as the backend for the Nova frontend. Built with Python 3.12+, FastAPI, and async/await patterns.
 
 ## Commands
 
 ```bash
 # Development
 uv run python entrypoint.py          # Start server (port 8001)
-uv sync --frozen --no-dev            # Install dependencies
+uv sync --frozen                     # Install all dependencies (dev + prod)
+uv sync --frozen --no-dev            # Install prod dependencies only
 
-# Linting
+# Linting & Formatting
 ruff check src/                      # Check for lint errors
 ruff check src/ --fix                # Auto-fix lint errors
+ruff format src/                     # Format code
 
-# Testing
+# Testing (pytest-asyncio with asyncio_mode="auto")
 pytest tests/                        # Run all tests
-pytest tests/test_file.py::test_name # Run specific test
+pytest tests/test_file.py            # Run single test file
+pytest tests/test_file.py::TestClass::test_name  # Run specific test
 
 # Docker
 docker compose up --build            # Start with Docker
@@ -69,10 +72,11 @@ Use `get_logger(__name__)`. Three formatters: `DevFormatter` (colorized), `Struc
 ## Key Directories
 
 - `src/ember/services/` - Business logic and external API clients
-- `src/ember/routers/` - API endpoints
+- `src/ember/routers/` - API endpoints (fires, fuel, geocode, weather, vegetation, terrain)
 - `src/ember/api/` - Middleware and error handlers
 - `docs/` - Architecture documentation (CACHING.md, COG_PIPELINE.md)
 - `scripts/` - Data sync scripts
+- `tests/` - Pytest tests (use `asyncio_mode="auto"`, no need for `@pytest.mark.asyncio` decorator)
 
 ## Geospatial Notes
 
