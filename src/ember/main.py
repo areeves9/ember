@@ -21,6 +21,7 @@ from ember.routers import (
     fires_router,
     fuel_router,
     geocode_router,
+    satellite_router,
     terrain_router,
     vegetation_router,
     weather_router,
@@ -54,9 +55,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     if settings.copernicus_client_id:
         logger.info("Copernicus credentials configured")
     else:
-        logger.info(
-            "Copernicus not configured - vegetation endpoints will return stubs"
-        )
+        logger.info("Copernicus not configured - vegetation endpoints will return stubs")
 
     # Initialize terrain service with layer discovery
     if settings.landfire_s3_prefix:
@@ -80,6 +79,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             logger.info(f"Terrain service ready: {len(discovered)} layers available")
     else:
         logger.info("LANDFIRE_S3_PREFIX not configured - terrain endpoint unavailable")
+
+    # Check satellite service availability
+    try:
+        from ember.services.satellite import satellite_service
+
+        if satellite_service._ephemeris_available:
+            logger.info("Satellite tracking: available (with sun angle)")
+        else:
+            logger.info("Satellite tracking: available (without sun angle)")
+    except Exception:
+        logger.warning("Satellite tracking: unavailable (skyfield not installed)")
 
     logger.info(f"Ember ready! Listening on {settings.host}:{settings.port}")
 
@@ -121,6 +131,7 @@ def create_app() -> FastAPI:
     app.include_router(fuel_router, prefix="/api/v1")
     app.include_router(vegetation_router, prefix="/api/v1")
     app.include_router(terrain_router, prefix="/api/v1")
+    app.include_router(satellite_router, prefix="/api/v1")
 
     # Health check endpoint
     @app.get("/health")
@@ -143,6 +154,7 @@ def create_app() -> FastAPI:
                 "fuel": "/api/v1/fuel",
                 "vegetation": "/api/v1/vegetation",
                 "terrain": "/api/v1/terrain",
+                "satellite": "/api/v1/satellite",
             },
         }
 
