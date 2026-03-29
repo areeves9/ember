@@ -31,6 +31,24 @@ SAMPLE_NORAD_ID = 37849
 
 SAMPLE_TLE_RESPONSE = f"{SAMPLE_TLE_NAME}\n{SAMPLE_TLE_LINE1}\n{SAMPLE_TLE_LINE2}\n"
 
+# Deterministic pass dict used to decouple field-structure tests from skyfield propagation
+_DETERMINISTIC_PASS = {
+    "satellite": "Suomi NPP",
+    "norad_id": 37849,
+    "source_key": "VIIRS_SNPP_NRT",
+    "instrument": "VIIRS",
+    "aos": "2026-03-29T10:00:00Z",
+    "tca": "2026-03-29T10:05:00Z",
+    "los": "2026-03-29T10:10:00Z",
+    "max_elevation_deg": 67.3,
+    "direction": "NW",
+    "swath_km": 3060.0,
+    "time_until_s": 3735,
+    "solar_elevation_deg": 35.2,
+    "is_daytime_pass": True,
+    "quality_score": 89,
+}
+
 
 @pytest.fixture(autouse=True)
 def clear_tle_cache():
@@ -90,6 +108,22 @@ def _seed_cache(norad_id, age_seconds=0):
             "tle_line2": SAMPLE_TLE_LINE2,
         },
     }
+
+
+@pytest.fixture
+def make_pass():
+    """Factory fixture: returns a minimal pass dict keyed by TCA string."""
+
+    def _factory(tca: str) -> dict:
+        return {
+            "satellite": "Suomi NPP",
+            "norad_id": 37849,
+            "tca": tca,
+            "aos": tca,
+            "los": tca,
+        }
+
+    return _factory
 
 
 # ===========================================================================
@@ -409,25 +443,28 @@ class TestGetPasses:
         assert "passes" not in result
 
     async def test_polar_source_returns_passes_with_required_fields(self, service):
-        """VIIRS source should return passes with all expected fields."""
-        _seed_cache(SAMPLE_NORAD_ID, age_seconds=100)
-        # Mock sun angle to return a fixed value
-        service._compute_sun_angle = MagicMock(return_value=35.0)
+        """VIIRS source should return passes with all expected fields.
 
-        result = await service.get_passes("VIIRS_SNPP_NRT", 34.05, -118.25, hours=24)
+        _compute_passes is mocked so the assertion is not contingent on skyfield
+        producing passes for a particular time window.
+        """
+        _seed_cache(SAMPLE_NORAD_ID, age_seconds=100)
+
+        with patch.object(service, "_compute_passes", return_value=[_DETERMINISTIC_PASS]):
+            result = await service.get_passes("VIIRS_SNPP_NRT", 34.05, -118.25, hours=24)
 
         assert result["source"] == "VIIRS_SNPP_NRT"
         assert result["is_geostationary"] is False
         assert isinstance(result["passes"], list)
         assert result["pass_count"] == len(result["passes"])
+        assert len(result["passes"]) == 1
 
-        if result["passes"]:
-            first_pass = result["passes"][0]
-            assert self.PASS_REQUIRED_FIELDS.issubset(first_pass.keys())
-            assert first_pass["source_key"] == "VIIRS_SNPP_NRT"
-            assert first_pass["instrument"] == "VIIRS"
-            assert first_pass["norad_id"] == SAMPLE_NORAD_ID
-            assert first_pass["swath_km"] == 3060.0
+        first_pass = result["passes"][0]
+        assert self.PASS_REQUIRED_FIELDS.issubset(first_pass.keys())
+        assert first_pass["source_key"] == "VIIRS_SNPP_NRT"
+        assert first_pass["instrument"] == "VIIRS"
+        assert first_pass["norad_id"] == SAMPLE_NORAD_ID
+        assert first_pass["swath_km"] == 3060.0
 
     async def test_modis_returns_passes_from_both_satellites(self, service):
         """MODIS source should fetch TLEs for both Terra and Aqua."""
@@ -579,48 +616,36 @@ class TestGetPastPasses:
 class TestDetectionCorrelation:
     """Test detection time correlation logic."""
 
-    def _make_pass(self, tca: str) -> dict:
-        return {
-            "satellite": "Suomi NPP",
-            "norad_id": 37849,
-            "tca": tca,
-            "aos": tca,
-            "los": tca,
-        }
+    @pytest.mark.parametrize(
+        "detection_time,expected_confidence,expected_diff_s",
+        [
+            ("2026-03-28T12:03:00Z", "exact", 180),      # 3 min — within 5 min threshold
+            ("2026-03-28T12:20:00Z", "likely", None),     # 20 min — within 30 min threshold
+            ("2026-03-28T13:30:00Z", "uncertain", None),  # 90 min — within 2 hr threshold
+            ("2026-03-28T15:00:00Z", "no_match", None),   # 3 hr — beyond all thresholds
+        ],
+    )
+    def test_match_confidence_thresholds(
+        self, make_pass, detection_time, expected_confidence, expected_diff_s
+    ):
+        passes = [make_pass("2026-03-28T12:00:00Z")]
+        result = SatelliteService._correlate_detection(passes, detection_time)
+        assert result["match_confidence"] == expected_confidence
+        if expected_diff_s is not None:
+            assert result["tca_diff_s"] == expected_diff_s
 
-    def test_exact_match_within_5_minutes(self):
-        passes = [self._make_pass("2026-03-28T12:00:00Z")]
-        result = SatelliteService._correlate_detection(passes, "2026-03-28T12:03:00Z")
-        assert result["match_confidence"] == "exact"
-        assert result["tca_diff_s"] == 180
-
-    def test_likely_match_within_30_minutes(self):
-        passes = [self._make_pass("2026-03-28T12:00:00Z")]
-        result = SatelliteService._correlate_detection(passes, "2026-03-28T12:20:00Z")
-        assert result["match_confidence"] == "likely"
-
-    def test_uncertain_match_within_2_hours(self):
-        passes = [self._make_pass("2026-03-28T12:00:00Z")]
-        result = SatelliteService._correlate_detection(passes, "2026-03-28T13:30:00Z")
-        assert result["match_confidence"] == "uncertain"
-
-    def test_no_match_beyond_2_hours(self):
-        passes = [self._make_pass("2026-03-28T12:00:00Z")]
-        result = SatelliteService._correlate_detection(passes, "2026-03-28T15:00:00Z")
-        assert result["match_confidence"] == "no_match"
-
-    def test_picks_closest_pass(self):
+    def test_picks_closest_pass(self, make_pass):
         passes = [
-            self._make_pass("2026-03-28T10:00:00Z"),
-            self._make_pass("2026-03-28T12:00:00Z"),
-            self._make_pass("2026-03-28T14:00:00Z"),
+            make_pass("2026-03-28T10:00:00Z"),
+            make_pass("2026-03-28T12:00:00Z"),
+            make_pass("2026-03-28T14:00:00Z"),
         ]
         result = SatelliteService._correlate_detection(passes, "2026-03-28T12:02:00Z")
         assert result["match_confidence"] == "exact"
         assert result["matched_pass"]["tca"] == "2026-03-28T12:00:00Z"
 
-    def test_invalid_detection_time_returns_error(self):
-        passes = [self._make_pass("2026-03-28T12:00:00Z")]
+    def test_invalid_detection_time_returns_error(self, make_pass):
+        passes = [make_pass("2026-03-28T12:00:00Z")]
         result = SatelliteService._correlate_detection(passes, "not-a-date")
         assert result["match_confidence"] == "error"
 
@@ -703,17 +728,19 @@ class TestCompositeFreshness:
         assert hours == sorted(hours)
 
     async def test_freshness_cache_hit(self, service):
-        """Second call to same location should hit the freshness cache."""
+        """Second call to same location should hit the freshness cache, not recompute."""
         for norad_id in [37849, 43013, 54234, 25994, 27424]:
             _seed_cache(norad_id, age_seconds=100)
         service._compute_sun_angle = MagicMock(return_value=30.0)
 
         result1 = await service.get_composite_freshness(34.05, -118.25)
-        result2 = await service.get_composite_freshness(34.05, -118.25)
-
-        # Same data from cache
-        assert result1 == result2
         assert len(_freshness_cache) == 1
+
+        with patch.object(service, "get_past_passes", wraps=service.get_past_passes) as spy:
+            result2 = await service.get_composite_freshness(34.05, -118.25)
+            spy.assert_not_called()
+
+        assert result1 == result2
 
     async def test_freshness_most_recent_pass_has_required_fields(self, service):
         """Most recent pass summary should have satellite, tca, hours_ago."""
