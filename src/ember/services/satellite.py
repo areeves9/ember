@@ -140,6 +140,13 @@ _celestrak_last_failure: float = 0.0
 _CELESTRAK_COOLDOWN = 300  # 5 minutes — skip fetch attempts after a failure
 
 # ---------------------------------------------------------------------------
+# Freshness cache — keyed by rounded lat/lon, short TTL
+# ---------------------------------------------------------------------------
+_freshness_cache: dict[str, dict] = {}
+_FRESHNESS_CACHE_TTL = 900  # 15 minutes
+_FRESHNESS_CACHE_MAX_SIZE = 200
+
+# ---------------------------------------------------------------------------
 # Compass direction helpers
 # ---------------------------------------------------------------------------
 _COMPASS_DIRECTIONS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
@@ -352,6 +359,168 @@ class SatelliteService:
             result["detection_correlation"] = correlation
 
         return result
+
+    async def get_composite_freshness(
+        self,
+        lat: float,
+        lon: float,
+    ) -> dict[str, Any]:
+        """
+        Compute composite observation freshness across all polar-orbiting satellites.
+
+        Finds the most recent past pass and next upcoming pass across all 5
+        polar orbiters for a location, returning a staleness classification
+        and per-satellite breakdown.
+
+        Results are cached for 15 minutes keyed by location (rounded to 0.5
+        degrees) since freshness changes slowly relative to orbital periods.
+
+        Args:
+            lat: Observer latitude in degrees (-90 to 90).
+            lon: Observer longitude in degrees (-180 to 180).
+
+        Returns:
+            Dict with most_recent_pass, next_pass, current_gap_hours,
+            staleness classification, and per-satellite breakdown.
+        """
+        # Cache key: round to 0.5° grid (~55km)
+        cache_key = f"freshness:{round(lat * 2) / 2:.1f},{round(lon * 2) / 2:.1f}"
+        cached = _freshness_cache.get(cache_key)
+        if cached and (time() - cached["timestamp"] < _FRESHNESS_CACHE_TTL):
+            logger.debug("Freshness cache HIT for %s", cache_key)
+            return cached["data"]
+
+        logger.debug("Freshness cache MISS for %s", cache_key)
+
+        from datetime import datetime as dt
+        from datetime import timezone
+
+        now = dt.now(timezone.utc)
+        all_past: list[dict] = []
+        all_future: list[dict] = []
+        all_satellites: list[dict] = []
+
+        polar_sources = {k: v for k, v in SATELLITE_REGISTRY.items() if not v.is_geostationary}
+
+        for source_key, info in polar_sources.items():
+            for norad_id in info.norad_ids:
+                tle_data = await self._fetch_tle(norad_id)
+                sat_name = _NORAD_NAMES.get(norad_id, info.name)
+
+                # Most recent past pass (look back 24h)
+                past = self._compute_passes(
+                    tle_line1=tle_data["tle_line1"],
+                    tle_line2=tle_data["tle_line2"],
+                    name=tle_data["name"],
+                    lat=lat,
+                    lon=lon,
+                    hours=24,
+                    min_elevation=10.0,
+                    swath_km=info.swath_km,
+                    norad_id=norad_id,
+                    source_key=source_key,
+                    instrument=info.instrument,
+                    backward=True,
+                )
+
+                # Next future pass (look ahead 24h)
+                future = self._compute_passes(
+                    tle_line1=tle_data["tle_line1"],
+                    tle_line2=tle_data["tle_line2"],
+                    name=tle_data["name"],
+                    lat=lat,
+                    lon=lon,
+                    hours=24,
+                    min_elevation=10.0,
+                    swath_km=info.swath_km,
+                    norad_id=norad_id,
+                    source_key=source_key,
+                    instrument=info.instrument,
+                    backward=False,
+                )
+
+                all_past.extend(past)
+                all_future.extend(future)
+
+                # Per-satellite summary
+                last_pass_hours = None
+                if past:
+                    most_recent = max(past, key=lambda p: p["tca"])
+                    tca_dt = dt.fromisoformat(most_recent["tca"].replace("Z", "+00:00"))
+                    last_pass_hours = round((now - tca_dt).total_seconds() / 3600, 2)
+
+                all_satellites.append(
+                    {
+                        "satellite": sat_name,
+                        "source_key": source_key,
+                        "norad_id": norad_id,
+                        "last_pass_hours_ago": last_pass_hours,
+                    }
+                )
+
+        # Sort: per-satellite by most recent first
+        all_satellites.sort(key=lambda s: s["last_pass_hours_ago"] or 999)
+
+        # Find overall most recent past pass
+        most_recent_pass = None
+        current_gap_hours = None
+        if all_past:
+            best_past = max(all_past, key=lambda p: p["tca"])
+            tca_dt = dt.fromisoformat(best_past["tca"].replace("Z", "+00:00"))
+            current_gap_hours = round((now - tca_dt).total_seconds() / 3600, 2)
+            most_recent_pass = {
+                "satellite": best_past["satellite"],
+                "source_key": best_past["source_key"],
+                "tca": best_past["tca"],
+                "hours_ago": current_gap_hours,
+                "quality_score": best_past.get("quality_score"),
+                "is_daytime_pass": best_past.get("is_daytime_pass"),
+            }
+
+        # Find overall next upcoming pass
+        next_pass = None
+        if all_future:
+            best_future = min(all_future, key=lambda p: p["aos"])
+            aos_dt = dt.fromisoformat(best_future["aos"].replace("Z", "+00:00"))
+            hours_until = round((aos_dt - now).total_seconds() / 3600, 2)
+            next_pass = {
+                "satellite": best_future["satellite"],
+                "source_key": best_future["source_key"],
+                "tca": best_future.get("tca"),
+                "hours_until": hours_until,
+                "quality_score": best_future.get("quality_score"),
+            }
+
+        # Staleness classification
+        staleness = self._classify_staleness(current_gap_hours)
+
+        result = {
+            "most_recent_pass": most_recent_pass,
+            "next_pass": next_pass,
+            "current_gap_hours": current_gap_hours,
+            "staleness": staleness,
+            "all_satellites": all_satellites,
+        }
+
+        # Cache result
+        if len(_freshness_cache) >= _FRESHNESS_CACHE_MAX_SIZE:
+            _freshness_cache.clear()
+        _freshness_cache[cache_key] = {"timestamp": time(), "data": result}
+
+        return result
+
+    @staticmethod
+    def _classify_staleness(gap_hours: float | None) -> str:
+        """Classify observation staleness based on time since last pass."""
+        if gap_hours is None:
+            return "unknown"
+        if gap_hours < 3:
+            return "fresh"
+        if gap_hours < 8:
+            return "moderate"
+        if gap_hours < 16:
+            return "stale"
+        return "very_stale"
 
     @staticmethod
     def _correlate_detection(passes: list[dict], detection_time: str) -> dict[str, Any]:

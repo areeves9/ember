@@ -15,6 +15,7 @@ from ember.services.satellite import (
     SATELLITE_REGISTRY,
     SatelliteService,
     _azimuth_to_compass,
+    _freshness_cache,
     _tle_cache,
 )
 
@@ -33,11 +34,13 @@ SAMPLE_TLE_RESPONSE = f"{SAMPLE_TLE_NAME}\n{SAMPLE_TLE_LINE1}\n{SAMPLE_TLE_LINE2
 
 @pytest.fixture(autouse=True)
 def clear_tle_cache():
-    """Reset TLE cache and cooldown state before each test."""
+    """Reset TLE cache, freshness cache, and cooldown state before each test."""
     _tle_cache.clear()
+    _freshness_cache.clear()
     sat_module._celestrak_last_failure = 0.0
     yield
     _tle_cache.clear()
+    _freshness_cache.clear()
     sat_module._celestrak_last_failure = 0.0
 
 
@@ -620,3 +623,110 @@ class TestDetectionCorrelation:
         passes = [self._make_pass("2026-03-28T12:00:00Z")]
         result = SatelliteService._correlate_detection(passes, "not-a-date")
         assert result["match_confidence"] == "error"
+
+
+# ===========================================================================
+# Composite Freshness (ORQ-95)
+# ===========================================================================
+
+
+class TestStalenessClassification:
+    """Test staleness classification thresholds."""
+
+    @pytest.mark.parametrize(
+        "gap_hours,expected",
+        [
+            (0.5, "fresh"),
+            (2.9, "fresh"),
+            (3.0, "moderate"),
+            (7.9, "moderate"),
+            (8.0, "stale"),
+            (15.9, "stale"),
+            (16.0, "very_stale"),
+            (48.0, "very_stale"),
+            (None, "unknown"),
+        ],
+    )
+    def test_staleness_thresholds(self, gap_hours, expected):
+        assert SatelliteService._classify_staleness(gap_hours) == expected
+
+
+class TestCompositeFreshness:
+    """Test composite freshness computation across all satellites."""
+
+    async def test_freshness_returns_required_fields(self, service):
+        """Freshness response should have all expected top-level fields."""
+        # Seed TLEs for all polar-orbiting satellites
+        for norad_id in [37849, 43013, 54234, 25994, 27424]:
+            _seed_cache(norad_id, age_seconds=100)
+        service._compute_sun_angle = MagicMock(return_value=20.0)
+
+        result = await service.get_composite_freshness(34.05, -118.25)
+
+        assert "most_recent_pass" in result
+        assert "next_pass" in result
+        assert "current_gap_hours" in result
+        assert "staleness" in result
+        assert "all_satellites" in result
+        assert isinstance(result["all_satellites"], list)
+        assert len(result["all_satellites"]) == 5  # 5 polar orbiters
+
+    async def test_freshness_staleness_is_valid(self, service):
+        """Staleness should be one of the defined classifications."""
+        for norad_id in [37849, 43013, 54234, 25994, 27424]:
+            _seed_cache(norad_id, age_seconds=100)
+        service._compute_sun_angle = MagicMock(return_value=15.0)
+
+        result = await service.get_composite_freshness(34.05, -118.25)
+
+        assert result["staleness"] in (
+            "fresh",
+            "moderate",
+            "stale",
+            "very_stale",
+            "unknown",
+        )
+
+    async def test_freshness_satellites_sorted_by_recency(self, service):
+        """Per-satellite list should be sorted by most recent first."""
+        for norad_id in [37849, 43013, 54234, 25994, 27424]:
+            _seed_cache(norad_id, age_seconds=100)
+        service._compute_sun_angle = MagicMock(return_value=25.0)
+
+        result = await service.get_composite_freshness(34.05, -118.25)
+
+        hours = [
+            s["last_pass_hours_ago"]
+            for s in result["all_satellites"]
+            if s["last_pass_hours_ago"] is not None
+        ]
+        assert hours == sorted(hours)
+
+    async def test_freshness_cache_hit(self, service):
+        """Second call to same location should hit the freshness cache."""
+        for norad_id in [37849, 43013, 54234, 25994, 27424]:
+            _seed_cache(norad_id, age_seconds=100)
+        service._compute_sun_angle = MagicMock(return_value=30.0)
+
+        result1 = await service.get_composite_freshness(34.05, -118.25)
+        result2 = await service.get_composite_freshness(34.05, -118.25)
+
+        # Same data from cache
+        assert result1 == result2
+        assert len(_freshness_cache) == 1
+
+    async def test_freshness_most_recent_pass_has_required_fields(self, service):
+        """Most recent pass summary should have satellite, tca, hours_ago."""
+        for norad_id in [37849, 43013, 54234, 25994, 27424]:
+            _seed_cache(norad_id, age_seconds=100)
+        service._compute_sun_angle = MagicMock(return_value=20.0)
+
+        result = await service.get_composite_freshness(34.05, -118.25)
+
+        if result["most_recent_pass"] is not None:
+            mrp = result["most_recent_pass"]
+            assert "satellite" in mrp
+            assert "source_key" in mrp
+            assert "tca" in mrp
+            assert "hours_ago" in mrp
+            assert "quality_score" in mrp

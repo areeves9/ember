@@ -130,6 +130,28 @@ async def get_past_passes(
         raise HTTPException(status_code=502, detail=f"Satellite prediction error: {str(e)}")
 
 
+@router.get("/freshness")
+async def get_freshness(
+    lat: Annotated[float, Query(ge=-90, le=90, description="Observer latitude")],
+    lon: Annotated[float, Query(ge=-180, le=180, description="Observer longitude")],
+    _user: dict = require_auth,
+):
+    """
+    Get composite observation freshness across all polar-orbiting satellites.
+
+    Returns the most recent past pass, the next upcoming pass, a staleness
+    classification, and a per-satellite breakdown. Cached for 15 minutes.
+    """
+    try:
+        result = await satellite_service.get_composite_freshness(lat=lat, lon=lon)
+        result["location"] = {"lat": lat, "lon": lon}
+        result["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Freshness computation error: {str(e)}")
+
+
 @router.get("/sources")
 async def list_sources():
     """List available satellite sources with orbital metadata."""
