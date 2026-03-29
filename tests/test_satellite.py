@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+import ember.services.satellite as sat_module
 from ember.exceptions import ExternalAPIError
 from ember.services.satellite import (
     _NORAD_NAMES,
@@ -32,10 +33,12 @@ SAMPLE_TLE_RESPONSE = f"{SAMPLE_TLE_NAME}\n{SAMPLE_TLE_LINE1}\n{SAMPLE_TLE_LINE2
 
 @pytest.fixture(autouse=True)
 def clear_tle_cache():
-    """Reset TLE cache before each test to prevent bleed between tests."""
+    """Reset TLE cache and cooldown state before each test."""
     _tle_cache.clear()
+    sat_module._celestrak_last_failure = 0.0
     yield
     _tle_cache.clear()
+    sat_module._celestrak_last_failure = 0.0
 
 
 @pytest.fixture
@@ -304,6 +307,66 @@ class TestTLEFetching:
         # Cache should have been cleared then repopulated with new entry
         assert len(_tle_cache) == 1
         assert SAMPLE_NORAD_ID in _tle_cache
+
+    async def test_retry_succeeds_on_second_attempt(self, service, mock_celestrak_response):
+        """If first fetch attempt fails but second succeeds, return fresh data."""
+        mock_client = AsyncMock()
+        mock_client.get.side_effect = [
+            httpx.ConnectError("transient failure"),
+            mock_celestrak_response,
+        ]
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await service._fetch_tle(SAMPLE_NORAD_ID)
+
+        assert result["tle_stale"] is False
+        assert result["tle_line1"] == SAMPLE_TLE_LINE1
+        assert mock_client.get.call_count == 2
+
+    async def test_cooldown_skips_fetch_with_stale_cache(self, service):
+        """During cooldown, stale cache is returned without a network call."""
+        _seed_cache(SAMPLE_NORAD_ID, age_seconds=_TLE_CACHE_TTL + 100)
+        # Simulate a recent failure
+        sat_module._celestrak_last_failure = time() - 60  # 1 min ago, within 5 min cooldown
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            result = await service._fetch_tle(SAMPLE_NORAD_ID)
+
+            mock_client_cls.assert_not_called()
+            assert result["tle_stale"] is True
+            assert result["name"] == SAMPLE_TLE_NAME
+
+    async def test_cooldown_resets_on_success(self, service, mock_celestrak_response):
+        """A successful fetch should reset the cooldown timer."""
+        sat_module._celestrak_last_failure = time() - 400  # cooldown expired
+
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_celestrak_response
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await service._fetch_tle(SAMPLE_NORAD_ID)
+
+        assert sat_module._celestrak_last_failure == 0.0
+
+    async def test_failure_sets_cooldown(self, service):
+        """After both retry attempts fail, the cooldown timer should be set."""
+        mock_client = AsyncMock()
+        mock_client.get.side_effect = httpx.ConnectError("connection refused")
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with pytest.raises(ExternalAPIError):
+                await service._fetch_tle(SAMPLE_NORAD_ID)
+
+        assert sat_module._celestrak_last_failure > 0
 
 
 # ===========================================================================
