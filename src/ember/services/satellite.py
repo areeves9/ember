@@ -134,6 +134,12 @@ _TLE_CACHE_MAX_SIZE = 20
 CELESTRAK_URL = "https://celestrak.org/NORAD/elements/gp.php"
 
 # ---------------------------------------------------------------------------
+# CelesTrak fetch cooldown — avoid hammering a down service
+# ---------------------------------------------------------------------------
+_celestrak_last_failure: float = 0.0
+_CELESTRAK_COOLDOWN = 300  # 5 minutes — skip fetch attempts after a failure
+
+# ---------------------------------------------------------------------------
 # Compass direction helpers
 # ---------------------------------------------------------------------------
 _COMPASS_DIRECTIONS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
@@ -270,10 +276,12 @@ class SatelliteService:
         """
         Fetch a Two-Line Element set from CelesTrak for a given NORAD catalog ID.
 
-        Uses a 24-hour in-memory cache. On cache miss, fetches from CelesTrak's
-        GP API. If CelesTrak is unreachable and a stale cache entry exists, returns
-        the stale data with tle_stale=True. If no cache exists at all, raises
-        ExternalAPIError.
+        Uses a 24-hour in-memory cache with cache hit/miss logging. On cache miss,
+        fetches from CelesTrak's GP API with a single retry on transient failures.
+
+        A cooldown mechanism prevents hammering CelesTrak when it's down — after a
+        failure, subsequent fetch attempts within 5 minutes are skipped and stale
+        cache is returned instead.
 
         Args:
             norad_id: NORAD catalog number (e.g. 37849 for Suomi NPP).
@@ -284,49 +292,88 @@ class SatelliteService:
         Raises:
             ExternalAPIError: If fetch fails and no cached TLE is available.
         """
+        global _celestrak_last_failure
+
         cached = _tle_cache.get(norad_id)
         if cached and (time() - cached["timestamp"] < _TLE_CACHE_TTL):
+            logger.debug("TLE cache HIT for NORAD %d", norad_id)
             return {**cached["data"], "tle_stale": False}
+
+        logger.debug("TLE cache MISS for NORAD %d", norad_id)
+
+        # Cooldown: if CelesTrak failed recently, skip the fetch and use stale cache
+        if _celestrak_last_failure and (time() - _celestrak_last_failure < _CELESTRAK_COOLDOWN):
+            if cached:
+                logger.debug(
+                    "CelesTrak cooldown active, using stale TLE for NORAD %d",
+                    norad_id,
+                )
+                return {**cached["data"], "tle_stale": True}
 
         url = CELESTRAK_URL
         params = {"CATNR": norad_id, "FORMAT": "TLE"}
 
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url, params=params, timeout=self.timeout)
-                response.raise_for_status()
+        # Retry once on transient failure
+        last_exc = None
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(url, params=params, timeout=self.timeout)
+                    response.raise_for_status()
 
-            lines = [line.strip() for line in response.text.strip().splitlines() if line.strip()]
-            if len(lines) < 3:
-                raise ValueError(f"Expected 3 TLE lines, got {len(lines)}")
+                lines = [
+                    line.strip() for line in response.text.strip().splitlines() if line.strip()
+                ]
+                if len(lines) < 3:
+                    raise ValueError(f"Expected 3 TLE lines, got {len(lines)}")
 
-            tle_data = {
-                "name": lines[0],
-                "tle_line1": lines[1],
-                "tle_line2": lines[2],
-            }
+                tle_data = {
+                    "name": lines[0],
+                    "tle_line1": lines[1],
+                    "tle_line2": lines[2],
+                }
 
-            # Cache eviction
-            if len(_tle_cache) >= _TLE_CACHE_MAX_SIZE:
-                _tle_cache.clear()
+                # Cache eviction
+                if len(_tle_cache) >= _TLE_CACHE_MAX_SIZE:
+                    _tle_cache.clear()
 
-            _tle_cache[norad_id] = {"timestamp": time(), "data": tle_data}
-            logger.debug("TLE fetched for NORAD %d (%s)", norad_id, tle_data["name"])
-            return {**tle_data, "tle_stale": False}
+                _tle_cache[norad_id] = {"timestamp": time(), "data": tle_data}
+                _celestrak_last_failure = 0.0  # reset cooldown on success
+                logger.info("TLE fetched for NORAD %d (%s)", norad_id, tle_data["name"])
+                return {**tle_data, "tle_stale": False}
 
-        except (httpx.HTTPError, ValueError) as exc:
-            if cached:
-                logger.warning(
-                    "CelesTrak fetch failed for NORAD %d, using stale TLE: %s",
-                    norad_id,
-                    exc,
-                )
-                return {**cached["data"], "tle_stale": True}
+            except (httpx.HTTPError, ValueError) as exc:
+                last_exc = exc
+                if attempt == 0:
+                    logger.debug(
+                        "CelesTrak fetch attempt 1 failed for NORAD %d: %s, retrying",
+                        norad_id,
+                        exc,
+                    )
+                    continue
 
-            raise ExternalAPIError(
-                f"Failed to fetch TLE for NORAD {norad_id} and no cached data available",
-                details={"norad_id": norad_id, "error": str(exc)},
-            ) from exc
+        # Both attempts failed
+        _celestrak_last_failure = time()
+
+        if cached:
+            logger.warning(
+                "CelesTrak fetch failed for NORAD %d after 2 attempts, "
+                "using stale TLE (age: %ds): %s",
+                norad_id,
+                round(time() - cached["timestamp"]),
+                last_exc,
+            )
+            return {**cached["data"], "tle_stale": True}
+
+        logger.error(
+            "CelesTrak fetch failed for NORAD %d with no cached data: %s",
+            norad_id,
+            last_exc,
+        )
+        raise ExternalAPIError(
+            f"Failed to fetch TLE for NORAD {norad_id} and no cached data available",
+            details={"norad_id": norad_id, "error": str(last_exc)},
+        ) from last_exc
 
     def _compute_passes(
         self,
