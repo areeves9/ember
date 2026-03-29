@@ -86,6 +86,50 @@ async def get_next_pass(
         raise HTTPException(status_code=502, detail=f"Satellite prediction error: {str(e)}")
 
 
+@router.get("/past-passes")
+async def get_past_passes(
+    lat: Annotated[float, Query(ge=-90, le=90, description="Observer latitude")],
+    lon: Annotated[float, Query(ge=-180, le=180, description="Observer longitude")],
+    source: Annotated[
+        str,
+        Query(description="Satellite source key (e.g. VIIRS_SNPP_NRT)"),
+    ],
+    hours_back: Annotated[int, Query(ge=1, le=168, description="Lookback window in hours")] = 48,
+    min_elevation: Annotated[
+        float, Query(ge=0, le=90, description="Minimum peak elevation in degrees")
+    ] = 10.0,
+    detection_time: Annotated[
+        str | None,
+        Query(description="ISO-8601 FIRMS detection timestamp to correlate with a pass"),
+    ] = None,
+    _user: dict = require_auth,
+):
+    """
+    Get past satellite passes over a location.
+
+    Returns passes that already occurred within the lookback window, sorted
+    most recent first. Optionally correlates a FIRMS detection timestamp
+    with the nearest satellite pass.
+    """
+    try:
+        result = await satellite_service.get_past_passes(
+            source=source,
+            lat=lat,
+            lon=lon,
+            hours=hours_back,
+            min_elevation=min_elevation,
+            detection_time=detection_time,
+        )
+        result["location"] = {"lat": lat, "lon": lon}
+        result["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return result
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Satellite prediction error: {str(e)}")
+
+
 @router.get("/sources")
 async def list_sources():
     """List available satellite sources with orbital metadata."""

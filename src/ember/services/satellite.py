@@ -272,6 +272,140 @@ class SatelliteService:
             "passes": all_passes,
         }
 
+    async def get_past_passes(
+        self,
+        source: str,
+        lat: float,
+        lon: float,
+        hours: int = 48,
+        min_elevation: float = 10.0,
+        detection_time: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Get past satellite passes over a location, optionally correlating with a
+        FIRMS detection timestamp.
+
+        Computes passes that already occurred within the lookback window. When
+        detection_time is provided, finds the pass whose TCA is closest to
+        that timestamp and assigns a match confidence level.
+
+        Args:
+            source: FIRMS source key (e.g. "VIIRS_SNPP_NRT").
+            lat: Observer latitude in degrees (-90 to 90).
+            lon: Observer longitude in degrees (-180 to 180).
+            hours: Lookback window in hours (default 48, max 168).
+            min_elevation: Minimum peak elevation in degrees (default 10).
+            detection_time: ISO-8601 timestamp of a FIRMS detection to correlate.
+
+        Returns:
+            Dict with past passes sorted by AOS descending (most recent first),
+            and optional detection correlation result.
+        """
+        info = SATELLITE_REGISTRY.get(source)
+        if not info:
+            valid = [k for k, v in SATELLITE_REGISTRY.items() if not v.is_geostationary]
+            raise ValueError(f"Unknown source '{source}'. Valid polar-orbiting sources: {valid}")
+
+        if info.is_geostationary:
+            return self._geostationary_info(source, info)
+
+        all_passes: list[dict] = []
+        tle_stale = False
+
+        for norad_id in info.norad_ids:
+            tle_data = await self._fetch_tle(norad_id)
+            if tle_data["tle_stale"]:
+                tle_stale = True
+
+            passes = self._compute_passes(
+                tle_line1=tle_data["tle_line1"],
+                tle_line2=tle_data["tle_line2"],
+                name=tle_data["name"],
+                lat=lat,
+                lon=lon,
+                hours=hours,
+                min_elevation=min_elevation,
+                swath_km=info.swath_km,
+                norad_id=norad_id,
+                source_key=source,
+                instrument=info.instrument,
+                backward=True,
+            )
+            all_passes.extend(passes)
+
+        # Sort by AOS descending (most recent first)
+        all_passes.sort(key=lambda p: p["aos"], reverse=True)
+
+        result: dict[str, Any] = {
+            "source": source,
+            "satellite": info.name,
+            "is_geostationary": False,
+            "tle_stale": tle_stale,
+            "lookback_hours": hours,
+            "pass_count": len(all_passes),
+            "passes": all_passes,
+        }
+
+        # Detection correlation
+        if detection_time and all_passes:
+            correlation = self._correlate_detection(all_passes, detection_time)
+            result["detection_correlation"] = correlation
+
+        return result
+
+    @staticmethod
+    def _correlate_detection(passes: list[dict], detection_time: str) -> dict[str, Any]:
+        """
+        Find the satellite pass whose TCA is closest to a FIRMS detection timestamp.
+
+        Assigns a match confidence based on the time difference:
+        - exact: TCA within +/-5 minutes
+        - likely: TCA within +/-30 minutes
+        - uncertain: TCA within +/-2 hours
+        - no_match: no pass found within 2 hours
+        """
+        from datetime import datetime as dt
+
+        try:
+            det_dt = dt.fromisoformat(detection_time.replace("Z", "+00:00"))
+        except ValueError:
+            return {
+                "match_confidence": "error",
+                "message": "Invalid detection_time format",
+            }
+
+        best_pass = None
+        best_diff_s = float("inf")
+
+        for p in passes:
+            tca_dt = dt.fromisoformat(p["tca"].replace("Z", "+00:00"))
+            diff_s = abs((tca_dt - det_dt).total_seconds())
+            if diff_s < best_diff_s:
+                best_diff_s = diff_s
+                best_pass = p
+
+        if best_pass is None:
+            return {"match_confidence": "no_match"}
+
+        # Classify confidence
+        if best_diff_s <= 300:  # 5 minutes
+            confidence = "exact"
+        elif best_diff_s <= 1800:  # 30 minutes
+            confidence = "likely"
+        elif best_diff_s <= 7200:  # 2 hours
+            confidence = "uncertain"
+        else:
+            return {
+                "match_confidence": "no_match",
+                "nearest_tca_diff_s": round(best_diff_s),
+            }
+
+        return {
+            "match_confidence": confidence,
+            "matched_pass": best_pass,
+            "tca_diff_s": round(best_diff_s),
+        }
+
     async def _fetch_tle(self, norad_id: int) -> dict:
         """
         Fetch a Two-Line Element set from CelesTrak for a given NORAD catalog ID.
@@ -388,14 +522,18 @@ class SatelliteService:
         norad_id: int,
         source_key: str,
         instrument: str,
+        backward: bool = False,
     ) -> list[dict]:
         """
         Compute pass predictions for a single satellite using skyfield SGP4 propagation.
 
         Creates an EarthSatellite from TLE lines, builds an observer position, and
         uses skyfield's find_events() to locate rise/culminate/set event sequences.
-        Each complete pass (rise→culminate→set) is evaluated against the minimum
+        Each complete pass (rise->culminate->set) is evaluated against the minimum
         elevation threshold, then enriched with sun angle and quality scoring.
+
+        When backward=True, computes passes in the past (now - hours) instead of
+        the future. The time_until_s field becomes negative for past passes.
 
         Incomplete passes at window boundaries (e.g. satellite already risen at t0)
         are skipped to avoid returning partial data.
@@ -407,8 +545,13 @@ class SatelliteService:
         satellite = EarthSatellite(tle_line1, tle_line2, name, _ts)
         observer = wgs84.latlon(lat, lon)
 
-        t0 = _ts.now()
-        t1 = _ts.utc(t0.utc_datetime() + timedelta(hours=hours))
+        now = _ts.now()
+        if backward:
+            t0 = _ts.utc(now.utc_datetime() - timedelta(hours=hours))
+            t1 = now
+        else:
+            t0 = now
+            t1 = _ts.utc(now.utc_datetime() + timedelta(hours=hours))
 
         # Find all rise/culminate/set events (altitude_degrees=0 to get full passes)
         times, events = satellite.find_events(observer, t0, t1, altitude_degrees=0.0)

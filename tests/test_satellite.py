@@ -499,3 +499,124 @@ class TestSunAngle:
             assert p["solar_elevation_deg"] is None
             assert p["is_daytime_pass"] is None
             assert p["quality_score"] is None
+
+
+# ===========================================================================
+# Past Passes & Detection Correlation (ORQ-94)
+# ===========================================================================
+
+
+class TestGetPastPasses:
+    """Test backward pass prediction and detection correlation."""
+
+    async def test_past_passes_returns_passes_sorted_descending(self, service):
+        """Past passes should be sorted by AOS descending (most recent first)."""
+        _seed_cache(SAMPLE_NORAD_ID, age_seconds=100)
+        service._compute_sun_angle = MagicMock(return_value=25.0)
+
+        result = await service.get_past_passes("VIIRS_SNPP_NRT", 34.05, -118.25, hours=48)
+
+        assert result["source"] == "VIIRS_SNPP_NRT"
+        assert result["is_geostationary"] is False
+        assert "lookback_hours" in result
+        assert result["lookback_hours"] == 48
+
+        if len(result["passes"]) > 1:
+            aos_times = [p["aos"] for p in result["passes"]]
+            assert aos_times == sorted(aos_times, reverse=True)
+
+    async def test_past_passes_unknown_source_raises(self, service):
+        with pytest.raises(ValueError, match="Unknown source"):
+            await service.get_past_passes("INVALID", 34.0, -118.0)
+
+    @pytest.mark.parametrize("source", ["GOES16_NRT", "GOES17_NRT", "GOES18_NRT"])
+    async def test_past_passes_geostationary_returns_static(self, service, source):
+        result = await service.get_past_passes(source, 34.0, -118.0)
+        assert result["is_geostationary"] is True
+
+    async def test_past_passes_modis_includes_both_satellites(self, service):
+        _seed_cache(25994, age_seconds=100)
+        _seed_cache(27424, age_seconds=100)
+        service._compute_sun_angle = MagicMock(return_value=20.0)
+
+        result = await service.get_past_passes("MODIS_NRT", 34.05, -118.25, hours=48)
+
+        if result["passes"]:
+            norad_ids = {p["norad_id"] for p in result["passes"]}
+            assert norad_ids.issubset({25994, 27424})
+
+    async def test_past_passes_with_detection_time_includes_correlation(self, service):
+        """When detection_time is provided, response should include correlation."""
+        _seed_cache(SAMPLE_NORAD_ID, age_seconds=100)
+        service._compute_sun_angle = MagicMock(return_value=30.0)
+
+        result = await service.get_past_passes(
+            "VIIRS_SNPP_NRT",
+            34.05,
+            -118.25,
+            hours=48,
+            detection_time="2026-03-28T12:00:00Z",
+        )
+
+        if result["passes"]:
+            assert "detection_correlation" in result
+            correlation = result["detection_correlation"]
+            assert "match_confidence" in correlation
+
+    async def test_past_passes_without_detection_time_no_correlation(self, service):
+        """Without detection_time, no correlation field should be present."""
+        _seed_cache(SAMPLE_NORAD_ID, age_seconds=100)
+        service._compute_sun_angle = MagicMock(return_value=15.0)
+
+        result = await service.get_past_passes("VIIRS_SNPP_NRT", 34.05, -118.25, hours=48)
+
+        assert "detection_correlation" not in result
+
+
+class TestDetectionCorrelation:
+    """Test detection time correlation logic."""
+
+    def _make_pass(self, tca: str) -> dict:
+        return {
+            "satellite": "Suomi NPP",
+            "norad_id": 37849,
+            "tca": tca,
+            "aos": tca,
+            "los": tca,
+        }
+
+    def test_exact_match_within_5_minutes(self):
+        passes = [self._make_pass("2026-03-28T12:00:00Z")]
+        result = SatelliteService._correlate_detection(passes, "2026-03-28T12:03:00Z")
+        assert result["match_confidence"] == "exact"
+        assert result["tca_diff_s"] == 180
+
+    def test_likely_match_within_30_minutes(self):
+        passes = [self._make_pass("2026-03-28T12:00:00Z")]
+        result = SatelliteService._correlate_detection(passes, "2026-03-28T12:20:00Z")
+        assert result["match_confidence"] == "likely"
+
+    def test_uncertain_match_within_2_hours(self):
+        passes = [self._make_pass("2026-03-28T12:00:00Z")]
+        result = SatelliteService._correlate_detection(passes, "2026-03-28T13:30:00Z")
+        assert result["match_confidence"] == "uncertain"
+
+    def test_no_match_beyond_2_hours(self):
+        passes = [self._make_pass("2026-03-28T12:00:00Z")]
+        result = SatelliteService._correlate_detection(passes, "2026-03-28T15:00:00Z")
+        assert result["match_confidence"] == "no_match"
+
+    def test_picks_closest_pass(self):
+        passes = [
+            self._make_pass("2026-03-28T10:00:00Z"),
+            self._make_pass("2026-03-28T12:00:00Z"),
+            self._make_pass("2026-03-28T14:00:00Z"),
+        ]
+        result = SatelliteService._correlate_detection(passes, "2026-03-28T12:02:00Z")
+        assert result["match_confidence"] == "exact"
+        assert result["matched_pass"]["tca"] == "2026-03-28T12:00:00Z"
+
+    def test_invalid_detection_time_returns_error(self):
+        passes = [self._make_pass("2026-03-28T12:00:00Z")]
+        result = SatelliteService._correlate_detection(passes, "not-a-date")
+        assert result["match_confidence"] == "error"
