@@ -27,6 +27,7 @@ htmlcov/
 *.md
 !README.md
 
-# Gemini AI
+# AI assistants
 .gemini/
+.claude/
 

@@ -20,6 +20,9 @@ COPY entrypoint.py ./
 # Install dependencies
 RUN uv sync --frozen --no-dev
 
+# Pre-download JPL ephemeris for satellite pass sun angle computation (~17MB, cached to disk)
+RUN uv run python -c "from skyfield.api import load; load('de421.bsp')"
+
 # Expose port
 EXPOSE 8001
 

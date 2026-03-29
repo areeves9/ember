@@ -14,6 +14,10 @@ wheels/
 .env.local
 .env.*.local
 
-# Gemini AI
+# AI assistants
 .gemini/
+.claude/
+
+# Skyfield ephemeris data (downloaded at runtime / baked into Docker image)
+*.bsp
 
