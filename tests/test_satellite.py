@@ -17,6 +17,7 @@ from ember.services.satellite import (
     _azimuth_to_compass,
     _freshness_cache,
     _tle_cache,
+    _track_cache,
 )
 
 # ---------------------------------------------------------------------------
@@ -52,13 +53,15 @@ _DETERMINISTIC_PASS = {
 
 @pytest.fixture(autouse=True)
 def clear_tle_cache():
-    """Reset TLE cache, freshness cache, and cooldown state before each test."""
+    """Reset TLE cache, freshness cache, track cache, and cooldown state before each test."""
     _tle_cache.clear()
     _freshness_cache.clear()
+    _track_cache.clear()
     sat_module._celestrak_last_failure = 0.0
     yield
     _tle_cache.clear()
     _freshness_cache.clear()
+    _track_cache.clear()
     sat_module._celestrak_last_failure = 0.0
 
 
@@ -757,3 +760,157 @@ class TestCompositeFreshness:
             assert "tca" in mrp
             assert "hours_ago" in mrp
             assert "quality_score" in mrp
+
+
+# ===========================================================================
+# Ground Track (ORQ-108)
+# ===========================================================================
+
+
+class TestSplitAntimeridian:
+    """Unit tests for the anti-meridian splitting helper."""
+
+    @pytest.mark.parametrize(
+        "coords,expected_segments",
+        [
+            # No crossing — single segment returned unchanged
+            ([[0.0, 45.0], [10.0, 46.0], [20.0, 47.0]], 1),
+            # Single crossing — splits into two segments
+            ([[-170.0, 45.0], [170.0, 44.0]], 2),
+            # Two crossings — three segments
+            ([[-170.0, 45.0], [170.0, 44.0], [-170.0, 43.0]], 3),
+            # Empty input — empty output
+            ([], 0),
+            # Single point — one segment with one coord
+            ([[90.0, 30.0]], 1),
+        ],
+    )
+    def test_split_produces_expected_segment_count(self, coords, expected_segments):
+        segments = SatelliteService._split_antimeridian(coords)
+        assert len(segments) == expected_segments
+
+    def test_no_crossing_preserves_coordinates(self):
+        coords = [[10.0, 45.0], [20.0, 46.0], [30.0, 47.0]]
+        segments = SatelliteService._split_antimeridian(coords)
+        assert segments == [coords]
+
+    def test_crossing_splits_at_correct_point(self):
+        coords = [[-170.0, 45.0], [-160.0, 44.0], [170.0, 43.0], [160.0, 42.0]]
+        segments = SatelliteService._split_antimeridian(coords)
+        assert len(segments) == 2
+        assert segments[0] == [[-170.0, 45.0], [-160.0, 44.0]]
+        assert segments[1] == [[170.0, 43.0], [160.0, 42.0]]
+
+
+class TestGroundTrack:
+    """Tests for get_ground_track() service method."""
+
+    async def test_unknown_source_raises_value_error(self, service):
+        with pytest.raises(ValueError, match="Unknown source"):
+            await service.get_ground_track("INVALID_SOURCE")
+
+    @pytest.mark.parametrize("source", ["GOES16_NRT", "GOES17_NRT", "GOES18_NRT"])
+    async def test_geostationary_returns_static_with_empty_geojson(self, service, source):
+        result = await service.get_ground_track(source)
+        assert result["is_geostationary"] is True
+        assert result["geojson"]["type"] == "FeatureCollection"
+        assert result["geojson"]["features"] == []
+
+    async def test_returns_geojson_feature_collection(self, service):
+        _seed_cache(SAMPLE_NORAD_ID, age_seconds=100)
+        result = await service.get_ground_track("VIIRS_SNPP_NRT")
+        assert result["geojson"]["type"] == "FeatureCollection"
+        assert isinstance(result["geojson"]["features"], list)
+
+    async def test_has_past_future_and_current_position_features(self, service):
+        """Response must include at least one past track, future track, and current position."""
+        _seed_cache(SAMPLE_NORAD_ID, age_seconds=100)
+        result = await service.get_ground_track("VIIRS_SNPP_NRT", hours_behind=6, hours_ahead=6)
+
+        features = result["geojson"]["features"]
+        track_types = {f["properties"]["track_type"] for f in features}
+
+        assert "past" in track_types
+        assert "future" in track_types
+        assert "current_position" in track_types
+
+    async def test_positions_are_native_python_floats(self, service):
+        """Coordinates must be native Python floats — not numpy types — for JSON serialization."""
+        _seed_cache(SAMPLE_NORAD_ID, age_seconds=100)
+        result = await service.get_ground_track("VIIRS_SNPP_NRT")
+
+        for feature in result["geojson"]["features"]:
+            geom = feature["geometry"]
+            if geom["type"] == "Point":
+                lon, lat = geom["coordinates"]
+                assert type(lon) is float
+                assert type(lat) is float
+            elif geom["type"] == "LineString":
+                for lon, lat in geom["coordinates"]:
+                    assert type(lon) is float
+                    assert type(lat) is float
+
+    async def test_current_position_has_altitude(self, service):
+        """Current position Point feature must include altitude_km."""
+        _seed_cache(SAMPLE_NORAD_ID, age_seconds=100)
+        result = await service.get_ground_track("VIIRS_SNPP_NRT")
+
+        current = next(
+            (f for f in result["geojson"]["features"]
+             if f["properties"]["track_type"] == "current_position"),
+            None,
+        )
+        assert current is not None
+        assert "altitude_km" in current["properties"]
+        assert isinstance(current["properties"]["altitude_km"], float)
+
+    async def test_tle_stale_flag_propagates(self, service):
+        """If TLE is stale, tle_stale should be True in the response."""
+        _seed_cache(SAMPLE_NORAD_ID, age_seconds=_TLE_CACHE_TTL + 100)
+
+        mock_client = AsyncMock()
+        mock_client.get.side_effect = httpx.ConnectError("down")
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await service.get_ground_track("VIIRS_SNPP_NRT")
+
+        assert result["tle_stale"] is True
+
+    async def test_modis_includes_features_for_both_satellites(self, service):
+        """MODIS track should include features for both Terra (25994) and Aqua (27424)."""
+        _seed_cache(25994, age_seconds=100)
+        _seed_cache(27424, age_seconds=100)
+
+        result = await service.get_ground_track("MODIS_NRT")
+
+        norad_ids_in_features = {
+            f["properties"]["norad_id"] for f in result["geojson"]["features"]
+        }
+        assert 25994 in norad_ids_in_features
+        assert 27424 in norad_ids_in_features
+
+    async def test_cache_hit_skips_recomputation(self, service):
+        """Second call with same params should return cached result without fetching TLEs."""
+        _seed_cache(SAMPLE_NORAD_ID, age_seconds=100)
+
+        await service.get_ground_track("VIIRS_SNPP_NRT", hours_behind=6, hours_ahead=6)
+        assert len(_track_cache) == 1
+
+        with patch.object(service, "_fetch_tle", wraps=service._fetch_tle) as spy:
+            await service.get_ground_track("VIIRS_SNPP_NRT", hours_behind=6, hours_ahead=6)
+            spy.assert_not_called()
+
+    async def test_response_includes_metadata_fields(self, service):
+        """Top-level response must include expected metadata fields."""
+        _seed_cache(SAMPLE_NORAD_ID, age_seconds=100)
+        result = await service.get_ground_track("VIIRS_SNPP_NRT", hours_behind=3, hours_ahead=3)
+
+        assert result["source"] == "VIIRS_SNPP_NRT"
+        assert result["is_geostationary"] is False
+        assert result["hours_behind"] == 3
+        assert result["hours_ahead"] == 3
+        assert result["interval_s"] == 30
+        assert "tle_stale" in result

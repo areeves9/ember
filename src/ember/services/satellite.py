@@ -147,6 +147,13 @@ _FRESHNESS_CACHE_TTL = 900  # 15 minutes
 _FRESHNESS_CACHE_MAX_SIZE = 200
 
 # ---------------------------------------------------------------------------
+# Ground track cache — keyed by source + window params, 5-min TTL
+# ---------------------------------------------------------------------------
+_track_cache: dict[str, dict] = {}
+_TRACK_CACHE_TTL = 300  # 5 minutes
+_TRACK_CACHE_MAX_SIZE = 50
+
+# ---------------------------------------------------------------------------
 # Compass direction helpers
 # ---------------------------------------------------------------------------
 _COMPASS_DIRECTIONS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
@@ -868,6 +875,202 @@ class SatelliteService:
             swath_factor = 10.0
 
         return round(elevation_factor + sun_factor + swath_factor)
+
+    async def get_ground_track(
+        self,
+        source: str,
+        hours_behind: int = 6,
+        hours_ahead: int = 6,
+        interval_s: int = 30,
+    ) -> dict[str, Any]:
+        """
+        Compute the ground track (subsatellite point positions) for a satellite.
+
+        Propagates the satellite position at regular intervals over a ±N hour
+        window centred on now, then splits positions into past/future tracks and
+        a current-position point. Returns a GeoJSON FeatureCollection suitable
+        for rendering as map polylines.
+
+        Anti-meridian crossings (longitude jumps > 180°) are handled by splitting
+        the LineString at those points to avoid lines drawing across the globe.
+
+        Results are cached for 5 minutes. The cache key does not include lat/lon
+        because ground tracks are observer-independent global paths.
+
+        Args:
+            source: FIRMS source key (e.g. "VIIRS_SNPP_NRT").
+            hours_behind: Hours of past track to include (1-24).
+            hours_ahead: Hours of future track to include (1-24).
+            interval_s: Seconds between position samples (10-300).
+
+        Returns:
+            Dict with source metadata, tle_stale flag, and geojson FeatureCollection.
+
+        Raises:
+            ValueError: If source is unknown.
+            ExternalAPIError: If TLE fetch fails with no cached data.
+        """
+        if source not in SATELLITE_REGISTRY:
+            valid = ", ".join(
+                k for k, v in SATELLITE_REGISTRY.items() if not v.is_geostationary
+            )
+            raise ValueError(f"Unknown source '{source}'. Valid polar-orbiting sources: {valid}")
+
+        info = SATELLITE_REGISTRY[source]
+
+        if info.is_geostationary:
+            return {
+                **self._geostationary_info(source, info),
+                "geojson": {"type": "FeatureCollection", "features": []},
+            }
+
+        # Cache check
+        cache_key = f"track:{source}:{hours_behind}:{hours_ahead}:{interval_s}"
+        cached = _track_cache.get(cache_key)
+        if cached and (time() - cached["timestamp"] < _TRACK_CACHE_TTL):
+            logger.debug("Track cache HIT for %s", cache_key)
+            return cached["data"]
+
+        logger.debug("Track cache MISS for %s", cache_key)
+
+        now = _ts.now()
+        t0 = _ts.utc(now.utc_datetime() - timedelta(hours=hours_behind))
+        t1 = _ts.utc(now.utc_datetime() + timedelta(hours=hours_ahead))
+        num_points = max(2, int((hours_behind + hours_ahead) * 3600 / interval_s))
+
+        all_features: list[dict] = []
+        tle_stale = False
+
+        for norad_id in info.norad_ids:
+            tle = await self._fetch_tle(norad_id)
+            if tle.get("tle_stale"):
+                tle_stale = True
+
+            sat_name = _NORAD_NAMES.get(norad_id, info.name)
+            satellite = EarthSatellite(tle["tle_line1"], tle["tle_line2"], sat_name, _ts)
+
+            times = _ts.linspace(t0, t1, num_points)
+            now_utc = now.utc_datetime()
+
+            past_coords: list[list[float]] = []
+            future_coords: list[list[float]] = []
+            current_pos: dict | None = None
+
+            for t in times:
+                geocentric = satellite.at(t)
+                subpoint = wgs84.subpoint(geocentric)
+                lat_deg = float(subpoint.latitude.degrees)
+                lon_deg = float(subpoint.longitude.degrees)
+                alt_km = float(subpoint.elevation.km)
+                t_utc = t.utc_datetime()
+
+                coord = [lon_deg, lat_deg]
+
+                if t_utc <= now_utc:
+                    past_coords.append(coord)
+                    # Update current position with the most recent past sample
+                    current_pos = {
+                        "lon": lon_deg,
+                        "lat": lat_deg,
+                        "altitude_km": round(alt_km, 1),
+                        "time": t_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    }
+                else:
+                    future_coords.append(coord)
+
+            shared_props = {
+                "satellite": sat_name,
+                "source_key": source,
+                "norad_id": norad_id,
+                "instrument": info.instrument,
+                "start_time": t0.utc_datetime().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "end_time": t1.utc_datetime().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+
+            # Past track — split at anti-meridian crossings
+            for segment in self._split_antimeridian(past_coords):
+                if len(segment) >= 2:
+                    all_features.append({
+                        "type": "Feature",
+                        "geometry": {"type": "LineString", "coordinates": segment},
+                        "properties": {**shared_props, "track_type": "past"},
+                    })
+
+            # Future track — split at anti-meridian crossings
+            for segment in self._split_antimeridian(future_coords):
+                if len(segment) >= 2:
+                    all_features.append({
+                        "type": "Feature",
+                        "geometry": {"type": "LineString", "coordinates": segment},
+                        "properties": {**shared_props, "track_type": "future"},
+                    })
+
+            # Current position point
+            if current_pos:
+                all_features.append({
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [current_pos["lon"], current_pos["lat"]],
+                    },
+                    "properties": {
+                        **shared_props,
+                        "track_type": "current_position",
+                        "altitude_km": current_pos["altitude_km"],
+                        "time": current_pos["time"],
+                    },
+                })
+
+        result: dict[str, Any] = {
+            "source": source,
+            "satellite": info.name,
+            "is_geostationary": False,
+            "tle_stale": tle_stale,
+            "hours_behind": hours_behind,
+            "hours_ahead": hours_ahead,
+            "interval_s": interval_s,
+            "geojson": {"type": "FeatureCollection", "features": all_features},
+        }
+
+        if len(_track_cache) >= _TRACK_CACHE_MAX_SIZE:
+            _track_cache.clear()
+        _track_cache[cache_key] = {"timestamp": time(), "data": result}
+
+        return result
+
+    @staticmethod
+    def _split_antimeridian(coords: list[list[float]]) -> list[list[list[float]]]:
+        """
+        Split a list of [lon, lat] coordinates into segments at anti-meridian crossings.
+
+        When a satellite crosses the ±180° meridian, consecutive longitude values
+        jump by more than 180°. A single LineString spanning that jump would draw
+        a line across the entire globe. This method splits at those jumps, returning
+        multiple clean segments.
+
+        Args:
+            coords: List of [lon, lat] coordinate pairs.
+
+        Returns:
+            List of coordinate-list segments, each safe to use as a LineString.
+        """
+        if not coords:
+            return []
+
+        segments: list[list[list[float]]] = []
+        current: list[list[float]] = [coords[0]]
+
+        for i in range(1, len(coords)):
+            prev_lon = coords[i - 1][0]
+            curr_lon = coords[i][0]
+            if abs(curr_lon - prev_lon) > 180.0:
+                segments.append(current)
+                current = [coords[i]]
+            else:
+                current.append(coords[i])
+
+        segments.append(current)
+        return segments
 
     @staticmethod
     def _geostationary_info(source: str, info: SatelliteInfo) -> dict[str, Any]:
