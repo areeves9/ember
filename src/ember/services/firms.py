@@ -32,6 +32,9 @@ SATELLITE_SOURCES = [
     "GOES18_NRT",
 ]
 
+# GOES sources are geostationary — not available via the FIRMS area/csv endpoint
+GEOSTATIONARY_SOURCES = {"GOES16_NRT", "GOES17_NRT", "GOES18_NRT"}
+
 # Earth radius in km (for haversine calculations)
 EARTH_RADIUS_KM = 6371.0
 
@@ -79,6 +82,27 @@ class FirmsService:
 
         if source not in SATELLITE_SOURCES:
             raise ValueError(f"Invalid source. Must be one of: {SATELLITE_SOURCES}")
+
+        if source in GEOSTATIONARY_SOURCES:
+            return {
+                "source": source,
+                "days_back": days_back,
+                "bbox": {
+                    "min_lat": min_lat,
+                    "max_lat": max_lat,
+                    "min_lon": min_lon,
+                    "max_lon": max_lon,
+                },
+                "detection_count": 0,
+                "cluster_count": 0,
+                "cluster_radius_km": cluster_radius_km,
+                "detections": [],
+                "geojson": {"type": "FeatureCollection", "features": []},
+                "message": (
+                    f"{source} is geostationary — fire detections are not available"
+                    " via the FIRMS area endpoint."
+                ),
+            }
 
         days_back = max(1, min(10, days_back))
 
