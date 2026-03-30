@@ -152,6 +152,51 @@ async def get_freshness(
         raise HTTPException(status_code=502, detail=f"Freshness computation error: {str(e)}")
 
 
+@router.get("/track")
+async def get_ground_track(
+    source: Annotated[
+        str,
+        Query(description="Satellite source key (e.g. VIIRS_SNPP_NRT)"),
+    ],
+    hours_behind: Annotated[
+        int, Query(ge=1, le=24, description="Hours of past track to include")
+    ] = 6,
+    hours_ahead: Annotated[
+        int, Query(ge=1, le=24, description="Hours of future track to include")
+    ] = 6,
+    interval_s: Annotated[
+        int, Query(ge=10, le=300, description="Seconds between position samples")
+    ] = 30,
+    _user: dict = require_auth,
+):
+    """
+    Get the ground track (subsatellite path) for a satellite.
+
+    Returns a GeoJSON FeatureCollection with three feature types:
+    - LineString with track_type='past' — where the satellite has been
+    - LineString with track_type='future' — where it is going
+    - Point with track_type='current_position' — current location
+
+    Anti-meridian crossings are handled by splitting LineStrings at ±180°.
+    MODIS returns tracks for both Terra and Aqua. GOES sources return empty
+    GeoJSON (geostationary — no ground track). Cached for 5 minutes.
+    """
+    try:
+        result = await satellite_service.get_ground_track(
+            source=source,
+            hours_behind=hours_behind,
+            hours_ahead=hours_ahead,
+            interval_s=interval_s,
+        )
+        result["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return result
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Ground track error: {str(e)}")
+
+
 @router.get("/sources")
 async def list_sources():
     """List available satellite sources with orbital metadata."""
