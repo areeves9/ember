@@ -90,6 +90,21 @@ class AirQualityService:
                 headers={"User-Agent": USER_AGENT},
                 timeout=self.timeout,
             )
+            if response.status_code == 400:
+                # AirNow returns 400 when no monitoring stations exist within
+                # the search radius — not an error, just no coverage.
+                logger.info(
+                    "AirNow no coverage at %.4f, %.4f within %.0f miles",
+                    lat, lon, distance_miles,
+                )
+                return {
+                    "status": "no_data",
+                    "message": f"No monitoring stations found within {distance_miles} miles",
+                    "latitude": lat,
+                    "longitude": lon,
+                    "source": "EPA AirNow",
+                    "retrieved_at": datetime.now(timezone.utc).isoformat(),
+                }
             response.raise_for_status()
 
         observations = response.json()
