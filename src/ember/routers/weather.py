@@ -5,6 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query
 
 from ember.auth import require_auth
+from ember.services.airquality import airquality_service
 from ember.services.openmeteo import openmeteo_service
 
 router = APIRouter(prefix="/weather", tags=["weather"])
@@ -158,3 +159,23 @@ async def get_hourly_forecast(
         return result
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Weather API error: {str(e)}")
+
+
+@router.get("/air-quality")
+async def get_air_quality(
+    lat: Annotated[float, Query(ge=-90, le=90, description="Latitude")],
+    lon: Annotated[float, Query(ge=-180, le=180, description="Longitude")],
+    _user: dict = require_auth,
+):
+    """Get current air quality index and pollutant levels from EPA AirNow.
+
+    Returns AQI value, category, dominant pollutant, and individual pollutant
+    concentrations. Essential for smoke impact assessment during wildfires.
+    """
+    try:
+        result = await airquality_service.get_air_quality(lat, lon)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AirNow API error: {str(e)}")
