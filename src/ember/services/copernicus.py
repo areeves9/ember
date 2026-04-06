@@ -387,6 +387,12 @@ class CopernicusService:
             km_per_degree_lat = 111.32
             km_per_degree_lon = 111.32 * abs(np.cos(np.radians(lat)))
 
+            if km_per_degree_lon < 1e-6:
+                return {
+                    "status": "error",
+                    "message": "Latitude too close to poles for bbox computation",
+                }
+
             lat_radius = size_km / 2 / km_per_degree_lat
             lon_radius = size_km / 2 / km_per_degree_lon
 
