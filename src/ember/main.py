@@ -21,6 +21,7 @@ from ember.routers import (
     fires_router,
     fuel_router,
     geocode_router,
+    imagery_router,
     nws_router,
     satellite_router,
     terrain_router,
@@ -128,6 +129,7 @@ def create_app() -> FastAPI:
     # Mount routers
     app.include_router(fires_router, prefix="/api/v1")
     app.include_router(geocode_router, prefix="/api/v1")
+    app.include_router(imagery_router, prefix="/api/v1")
     app.include_router(nws_router, prefix="/api/v1")
     app.include_router(weather_router, prefix="/api/v1")
     app.include_router(fuel_router, prefix="/api/v1")
@@ -152,6 +154,7 @@ def create_app() -> FastAPI:
             "endpoints": {
                 "fires": "/api/v1/fires",
                 "geocode": "/api/v1/geocode",
+                "imagery": "/api/v1/imagery",
                 "nws": "/api/v1/nws",
                 "weather": "/api/v1/weather",
                 "fuel": "/api/v1/fuel",
