@@ -7,6 +7,7 @@ for fire behavior modeling.
 import asyncio
 import base64
 import io
+import math
 from concurrent.futures import ThreadPoolExecutor
 from time import time
 from typing import Any
@@ -369,6 +370,30 @@ class TerrainService:
                 "status": "error",
                 "message": "Bbox too large (max 10 degrees per dimension)",
             }
+
+        # Minimum bbox clamp (1km) — prevents upscaling beyond native
+        # resolution (LANDFIRE is 30m, so <1km bbox yields <33 native pixels)
+        min_lat_span_deg = 1.0 / 111.32  # ~1km in degrees latitude
+        lat_center = (min_lat + max_lat) / 2
+        km_per_deg_lon = 111.32 * abs(math.cos(math.radians(lat_center)))
+        min_lon_span_deg = (
+            1.0 / km_per_deg_lon if km_per_deg_lon > 1e-6 else min_lat_span_deg
+        )
+
+        if (max_lat - min_lat) < min_lat_span_deg:
+            pad = (min_lat_span_deg - (max_lat - min_lat)) / 2
+            min_lat -= pad
+            max_lat += pad
+        if (max_lon - min_lon) < min_lon_span_deg:
+            pad = (min_lon_span_deg - (max_lon - min_lon)) / 2
+            min_lon -= pad
+            max_lon += pad
+
+        # Clamp to valid coordinate ranges after expansion
+        min_lat = max(min_lat, -90.0)
+        max_lat = min(max_lat, 90.0)
+        min_lon = max(min_lon, -180.0)
+        max_lon = min(max_lon, 180.0)
 
         if layer not in self._layer_urls:
             return {
