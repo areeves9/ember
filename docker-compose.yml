@@ -4,6 +4,7 @@ services:
     ports:
       - "8001:8001"
     environment:
+      - AIRNOW_API_KEY=${AIRNOW_API_KEY}
       - ENVIRONMENT=production
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
       - SUPABASE_URL=${SUPABASE_URL}
