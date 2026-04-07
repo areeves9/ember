@@ -370,6 +370,18 @@ class TerrainService:
                 "message": "Bbox too large (max 10 degrees per dimension)",
             }
 
+        # Minimum bbox clamp (1km) — prevents upscaling beyond native
+        # resolution (LANDFIRE is 30m, so <1km bbox yields <33 native pixels)
+        min_span_deg = 1.0 / 111.32  # ~1km in degrees latitude
+        if (max_lat - min_lat) < min_span_deg:
+            pad = (min_span_deg - (max_lat - min_lat)) / 2
+            min_lat -= pad
+            max_lat += pad
+        if (max_lon - min_lon) < min_span_deg:
+            pad = (min_span_deg - (max_lon - min_lon)) / 2
+            min_lon -= pad
+            max_lon += pad
+
         if layer not in self._layer_urls:
             return {
                 "status": "error",

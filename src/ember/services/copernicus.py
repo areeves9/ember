@@ -413,6 +413,21 @@ class CopernicusService:
                 "message": "Could not determine bounding box",
             }
 
+        # --- Minimum bbox clamp (1km) ---
+        # Prevents wasteful API calls that upscale beyond native resolution
+        # (Sentinel-2 is 10m, so <1km bbox yields <100 native pixels)
+        min_span_deg = 1.0 / 111.32  # ~1km in degrees latitude
+        lat_span = max_lat - min_lat
+        lon_span = max_lon - min_lon
+        if lat_span < min_span_deg:
+            pad = (min_span_deg - lat_span) / 2
+            min_lat -= pad
+            max_lat += pad
+        if lon_span < min_span_deg:
+            pad = (min_span_deg - lon_span) / 2
+            min_lon -= pad
+            max_lon += pad
+
         # --- Resolution ---
         if max_size is not None:
             if max_size < 64 or max_size > 2048:
