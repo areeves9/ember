@@ -27,6 +27,10 @@ async def get_terrain(
         str | None, Query(description="Comma-separated layer names (default: all for point, required for bbox raster)")
     ] = None,
     format: Annotated[str, Query(description="Response format: 'json' (default) or 'raster'")] = "json",
+    max_size: Annotated[
+        int | None,
+        Query(ge=64, le=2048, description="Max raster dimension in pixels (default 512)"),
+    ] = None,
     # _user: dict = require_auth,  # TODO: Re-enable after testing
 ):
     """
@@ -108,13 +112,16 @@ async def get_terrain(
             )
         
         try:
-            result = await service.query_terrain_bbox_raster(
-                min_lat=min_lat,
-                max_lat=max_lat,
-                min_lon=min_lon,
-                max_lon=max_lon,
-                layer=layer,
-            )
+            raster_kwargs: dict = {
+                "min_lat": min_lat,
+                "max_lat": max_lat,
+                "min_lon": min_lon,
+                "max_lon": max_lon,
+                "layer": layer,
+            }
+            if max_size is not None:
+                raster_kwargs["max_size"] = max_size
+            result = await service.query_terrain_bbox_raster(**raster_kwargs)
             return result
         except Exception as e:
             # Note: Service layer returns generic error messages, so this is safe

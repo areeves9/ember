@@ -18,9 +18,7 @@ async def get_ndvi(
     ] = None,
     lon: Annotated[
         float | None,
-        Query(
-            ge=-180, le=180, description="Center longitude (use with lat and size_km)"
-        ),
+        Query(ge=-180, le=180, description="Center longitude (use with lat and size_km)"),
     ] = None,
     size_km: Annotated[
         float, Query(ge=1, le=100, description="Box size in km (use with lat/lon)")
@@ -52,6 +50,14 @@ async def get_ndvi(
     format: Annotated[
         str, Query(description="Response format: 'stats', 'raster' (GeoTIFF), or 'png'")
     ] = "stats",
+    max_size: Annotated[
+        int | None,
+        Query(
+            ge=64,
+            le=2048,
+            description="Override output resolution in pixels (default: auto by area)",
+        ),
+    ] = None,
     _user: dict = require_auth,
 ):
     """
@@ -73,6 +79,7 @@ async def get_ndvi(
     - Provide lat/lon/size_km for center-based queries
     - OR provide min_lat/max_lat/min_lon/max_lon for bbox queries
     - Set format='raster' for GeoTIFF base64 response
+    - Set max_size to override output resolution (64-2048 pixels)
     """
     # Validate format parameter
     if format not in ["stats", "raster", "png"]:
@@ -110,6 +117,7 @@ async def get_ndvi(
             start_date=start_date,
             end_date=end_date,
             format=format,
+            max_size=max_size,
         )
 
         if result["status"] == "error":
@@ -130,9 +138,7 @@ async def get_ndmi(
     ] = None,
     lon: Annotated[
         float | None,
-        Query(
-            ge=-180, le=180, description="Center longitude (use with lat and size_km)"
-        ),
+        Query(ge=-180, le=180, description="Center longitude (use with lat and size_km)"),
     ] = None,
     size_km: Annotated[
         float, Query(ge=1, le=100, description="Box size in km (use with lat/lon)")
@@ -164,6 +170,14 @@ async def get_ndmi(
     format: Annotated[
         str, Query(description="Response format: 'stats', 'raster' (GeoTIFF), or 'png'")
     ] = "stats",
+    max_size: Annotated[
+        int | None,
+        Query(
+            ge=64,
+            le=2048,
+            description="Override output resolution in pixels (default: auto by area)",
+        ),
+    ] = None,
     _user: dict = require_auth,
 ):
     """
@@ -183,6 +197,7 @@ async def get_ndmi(
     - Provide lat/lon/size_km for center-based queries
     - OR provide min_lat/max_lat/min_lon/max_lon for bbox queries
     - Set format='raster' for GeoTIFF base64 response
+    - Set max_size to override output resolution (64-2048 pixels)
     """
     # Validate format parameter
     if format not in ["stats", "raster", "png"]:
@@ -220,6 +235,7 @@ async def get_ndmi(
             start_date=start_date,
             end_date=end_date,
             format=format,
+            max_size=max_size,
         )
 
         if result["status"] == "error":
