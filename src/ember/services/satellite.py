@@ -612,7 +612,7 @@ class SatelliteService:
 
         logger.debug("TLE cache MISS for NORAD %d", norad_id)
 
-        # Cooldown: if CelesTrak failed recently, skip the fetch and use stale cache
+        # Cooldown: if CelesTrak failed recently, don't retry
         if _celestrak_last_failure and (time() - _celestrak_last_failure < _CELESTRAK_COOLDOWN):
             if cached:
                 logger.debug(
@@ -620,6 +620,10 @@ class SatelliteService:
                     norad_id,
                 )
                 return {**cached["data"], "tle_stale": True}
+            # No cache — fail immediately instead of blocking workers
+            raise ExternalAPIError(
+                f"CelesTrak unavailable (cooldown active) and no cached TLE for NORAD {norad_id}"
+            )
 
         url = CELESTRAK_URL
         params = {"CATNR": norad_id, "FORMAT": "TLE"}
