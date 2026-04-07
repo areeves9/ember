@@ -132,6 +132,7 @@ _TLE_CACHE_TTL = 86400  # 24 hours
 _TLE_CACHE_MAX_SIZE = 20
 
 CELESTRAK_URL = "https://celestrak.org/NORAD/elements/gp.php"
+_CELESTRAK_TIMEOUT = 5.0  # seconds — TLE payloads are <1KB, fail fast
 
 # ---------------------------------------------------------------------------
 # CelesTrak fetch cooldown — avoid hammering a down service
@@ -628,7 +629,7 @@ class SatelliteService:
         for attempt in range(2):
             try:
                 async with httpx.AsyncClient() as client:
-                    response = await client.get(url, params=params, timeout=self.timeout)
+                    response = await client.get(url, params=params, timeout=_CELESTRAK_TIMEOUT)
                     response.raise_for_status()
 
                 lines = [
