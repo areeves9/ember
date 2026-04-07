@@ -132,11 +132,13 @@ _TLE_CACHE_TTL = 86400  # 24 hours
 _TLE_CACHE_MAX_SIZE = 20
 
 CELESTRAK_URL = "https://celestrak.org/NORAD/elements/gp.php"
+_CELESTRAK_TIMEOUT = 5.0  # seconds — TLE payloads are <1KB, fail fast
 
 # ---------------------------------------------------------------------------
 # CelesTrak fetch cooldown — avoid hammering a down service
 # ---------------------------------------------------------------------------
 _celestrak_last_failure: float = 0.0
+_celestrak_cooldown_logged: bool = False  # True once we've logged the cooldown warning
 _CELESTRAK_COOLDOWN = 300  # 5 minutes — skip fetch attempts after a failure
 
 # ---------------------------------------------------------------------------
@@ -602,7 +604,7 @@ class SatelliteService:
         Raises:
             ExternalAPIError: If fetch fails and no cached TLE is available.
         """
-        global _celestrak_last_failure
+        global _celestrak_last_failure, _celestrak_cooldown_logged
 
         cached = _tle_cache.get(norad_id)
         if cached and (time() - cached["timestamp"] < _TLE_CACHE_TTL):
@@ -611,14 +613,14 @@ class SatelliteService:
 
         logger.debug("TLE cache MISS for NORAD %d", norad_id)
 
-        # Cooldown: if CelesTrak failed recently, skip the fetch and use stale cache
+        # Cooldown: if CelesTrak failed recently, don't retry
         if _celestrak_last_failure and (time() - _celestrak_last_failure < _CELESTRAK_COOLDOWN):
             if cached:
-                logger.debug(
-                    "CelesTrak cooldown active, using stale TLE for NORAD %d",
-                    norad_id,
-                )
                 return {**cached["data"], "tle_stale": True}
+            # No cache — fail immediately instead of blocking workers
+            raise ExternalAPIError(
+                f"CelesTrak unavailable (cooldown active) and no cached TLE for NORAD {norad_id}"
+            )
 
         url = CELESTRAK_URL
         params = {"CATNR": norad_id, "FORMAT": "TLE"}
@@ -628,7 +630,7 @@ class SatelliteService:
         for attempt in range(2):
             try:
                 async with httpx.AsyncClient() as client:
-                    response = await client.get(url, params=params, timeout=self.timeout)
+                    response = await client.get(url, params=params, timeout=_CELESTRAK_TIMEOUT)
                     response.raise_for_status()
 
                 lines = [
@@ -648,7 +650,15 @@ class SatelliteService:
                     _tle_cache.clear()
 
                 _tle_cache[norad_id] = {"timestamp": time(), "data": tle_data}
-                _celestrak_last_failure = 0.0  # reset cooldown on success
+
+                # Log recovery if we were in cooldown
+                if _celestrak_last_failure:
+                    logger.info("CelesTrak recovered — TLE fetch successful")
+                    _celestrak_last_failure = 0.0
+                    _celestrak_cooldown_logged = False
+                else:
+                    _celestrak_last_failure = 0.0
+
                 logger.info("TLE fetched for NORAD %d (%s)", norad_id, tle_data["name"])
                 return {**tle_data, "tle_stale": False}
 
@@ -662,28 +672,51 @@ class SatelliteService:
                     )
                     continue
 
-        # Both attempts failed
+        # Both attempts failed — activate cooldown
         _celestrak_last_failure = time()
 
-        if cached:
+        if not _celestrak_cooldown_logged:
+            _celestrak_cooldown_logged = True
             logger.warning(
-                "CelesTrak fetch failed for NORAD %d after 2 attempts, "
-                "using stale TLE (age: %ds): %s",
-                norad_id,
-                round(time() - cached["timestamp"]),
+                "CelesTrak unreachable — cooldown active for %ds. "
+                "Satellite endpoints will use stale cache or fail fast. "
+                "Last error: %s",
+                _CELESTRAK_COOLDOWN,
                 last_exc,
             )
+
+        if cached:
             return {**cached["data"], "tle_stale": True}
 
         logger.error(
-            "CelesTrak fetch failed for NORAD %d with no cached data: %s",
+            "CelesTrak unreachable, no cached TLE for NORAD %d",
             norad_id,
-            last_exc,
         )
         raise ExternalAPIError(
             f"Failed to fetch TLE for NORAD {norad_id} and no cached data available",
             details={"norad_id": norad_id, "error": str(last_exc)},
         ) from last_exc
+
+    async def prewarm_tle_cache(self) -> dict[str, str]:
+        """Fetch TLEs for all polar-orbiting satellites at startup.
+
+        Returns a summary dict of {norad_id: "ok"|"failed"} for logging.
+        Non-fatal — failures are logged but don't prevent startup.
+        """
+        norad_ids: set[int] = set()
+        for info in SATELLITE_REGISTRY.values():
+            if not info.is_geostationary:
+                norad_ids.update(info.norad_ids)
+
+        results: dict[str, str] = {}
+        for norad_id in sorted(norad_ids):
+            try:
+                tle = await self._fetch_tle(norad_id)
+                results[str(norad_id)] = f"ok ({tle['name']})"
+            except Exception:
+                results[str(norad_id)] = "failed"
+
+        return results
 
     def _compute_passes(
         self,
@@ -911,9 +944,7 @@ class SatelliteService:
             ExternalAPIError: If TLE fetch fails with no cached data.
         """
         if source not in SATELLITE_REGISTRY:
-            valid = ", ".join(
-                k for k, v in SATELLITE_REGISTRY.items() if not v.is_geostationary
-            )
+            valid = ", ".join(k for k, v in SATELLITE_REGISTRY.items() if not v.is_geostationary)
             raise ValueError(f"Unknown source '{source}'. Valid polar-orbiting sources: {valid}")
 
         info = SATELLITE_REGISTRY[source]
@@ -990,36 +1021,42 @@ class SatelliteService:
             # Past track — split at anti-meridian crossings
             for segment in self._split_antimeridian(past_coords):
                 if len(segment) >= 2:
-                    all_features.append({
-                        "type": "Feature",
-                        "geometry": {"type": "LineString", "coordinates": segment},
-                        "properties": {**shared_props, "track_type": "past"},
-                    })
+                    all_features.append(
+                        {
+                            "type": "Feature",
+                            "geometry": {"type": "LineString", "coordinates": segment},
+                            "properties": {**shared_props, "track_type": "past"},
+                        }
+                    )
 
             # Future track — split at anti-meridian crossings
             for segment in self._split_antimeridian(future_coords):
                 if len(segment) >= 2:
-                    all_features.append({
-                        "type": "Feature",
-                        "geometry": {"type": "LineString", "coordinates": segment},
-                        "properties": {**shared_props, "track_type": "future"},
-                    })
+                    all_features.append(
+                        {
+                            "type": "Feature",
+                            "geometry": {"type": "LineString", "coordinates": segment},
+                            "properties": {**shared_props, "track_type": "future"},
+                        }
+                    )
 
             # Current position point
             if current_pos:
-                all_features.append({
-                    "type": "Feature",
-                    "geometry": {
-                        "type": "Point",
-                        "coordinates": [current_pos["lon"], current_pos["lat"]],
-                    },
-                    "properties": {
-                        **shared_props,
-                        "track_type": "current_position",
-                        "altitude_km": current_pos["altitude_km"],
-                        "time": current_pos["time"],
-                    },
-                })
+                all_features.append(
+                    {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "Point",
+                            "coordinates": [current_pos["lon"], current_pos["lat"]],
+                        },
+                        "properties": {
+                            **shared_props,
+                            "track_type": "current_position",
+                            "altitude_km": current_pos["altitude_km"],
+                            "time": current_pos["time"],
+                        },
+                    }
+                )
 
         result: dict[str, Any] = {
             "source": source,

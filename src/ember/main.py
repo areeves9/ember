@@ -82,7 +82,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     else:
         logger.info("LANDFIRE_S3_PREFIX not configured - terrain endpoint unavailable")
 
-    # Check satellite service availability
+    # Check satellite service availability and pre-warm TLE cache
     try:
         from ember.services.satellite import satellite_service
 
@@ -90,6 +90,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             logger.info("Satellite tracking: available (with sun angle)")
         else:
             logger.info("Satellite tracking: available (without sun angle)")
+
+        # Pre-warm TLE cache so first user request doesn't wait on CelesTrak
+        results = await satellite_service.prewarm_tle_cache()
+        ok_count = sum(1 for v in results.values() if v.startswith("ok"))
+        total = len(results)
+        if ok_count == total:
+            logger.info(f"TLE cache pre-warmed: {ok_count}/{total} satellites ready")
+        elif ok_count > 0:
+            logger.warning(
+                f"TLE cache partially warmed: {ok_count}/{total} satellites. "
+                f"Failed: {[k for k, v in results.items() if v == 'failed']}"
+            )
+        else:
+            logger.warning("TLE cache pre-warm failed — CelesTrak may be unreachable")
     except Exception:
         logger.warning("Satellite tracking: unavailable (skyfield not installed)")
 

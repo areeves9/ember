@@ -50,6 +50,14 @@ async def get_truecolor(
     format: Annotated[
         str, Query(description="Response format: 'png' (default) or 'raster' (GeoTIFF)")
     ] = "png",
+    max_size: Annotated[
+        int | None,
+        Query(
+            ge=64,
+            le=2048,
+            description="Override output resolution in pixels (default: auto by area)",
+        ),
+    ] = None,
     _user: dict = require_auth,
 ):
     """
@@ -91,6 +99,7 @@ async def get_truecolor(
             start_date=start_date,
             end_date=end_date,
             format=format,
+            max_size=max_size,
         )
 
         if result["status"] == "error":

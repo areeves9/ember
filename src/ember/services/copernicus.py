@@ -305,6 +305,7 @@ class CopernicusService:
         start_date: str | None = None,
         end_date: str | None = None,
         format: str | None = None,
+        max_size: int | None = None,
     ) -> dict[str, Any]:
         """
         Generic pipeline for any Sentinel-2 product.
@@ -312,6 +313,11 @@ class CopernicusService:
         Handles: credential check, parameter validation, bbox computation,
         resolution selection, caching, Copernicus API call, rasterio parsing,
         base64 encoding, and response building.
+
+        Args:
+            max_size: Override output resolution (64-2048). When provided,
+                      bypasses the area-based resolution heuristic. When
+                      omitted, falls back to product's resolution tier.
         """
         if format is None:
             format = product.default_format
@@ -408,8 +414,16 @@ class CopernicusService:
             }
 
         # --- Resolution ---
-        area_km2 = self._compute_bbox_area_km2(min_lat, max_lat, min_lon, max_lon)
-        width, height = self._compute_resolution(area_km2, product.resolution_tier)
+        if max_size is not None:
+            if max_size < 64 or max_size > 2048:
+                return {
+                    "status": "error",
+                    "message": "max_size must be between 64 and 2048",
+                }
+            width, height = max_size, max_size
+        else:
+            area_km2 = self._compute_bbox_area_km2(min_lat, max_lat, min_lon, max_lon)
+            width, height = self._compute_resolution(area_km2, product.resolution_tier)
 
         bbox = [min_lon, min_lat, max_lon, max_lat]
 
@@ -417,7 +431,7 @@ class CopernicusService:
         cache_key = (
             f"{product.name}:{format}"
             f":{min_lat:.4f},{max_lat:.4f},{min_lon:.4f},{max_lon:.4f}"
-            f":{start_date}:{end_date}"
+            f":{start_date}:{end_date}:{width}"
         )
 
         cached = _product_cache.get(cache_key)
@@ -570,6 +584,7 @@ class CopernicusService:
         start_date: str | None = None,
         end_date: str | None = None,
         format: str = "stats",
+        max_size: int | None = None,
     ) -> dict[str, Any]:
         """Get NDVI (Normalized Difference Vegetation Index) for a location.
 
@@ -588,6 +603,7 @@ class CopernicusService:
             start_date=start_date,
             end_date=end_date,
             format=format,
+            max_size=max_size,
         )
 
     async def get_ndmi(
@@ -602,6 +618,7 @@ class CopernicusService:
         start_date: str | None = None,
         end_date: str | None = None,
         format: str = "stats",
+        max_size: int | None = None,
     ) -> dict[str, Any]:
         """Get NDMI (Normalized Difference Moisture Index) for a location.
 
@@ -620,6 +637,7 @@ class CopernicusService:
             start_date=start_date,
             end_date=end_date,
             format=format,
+            max_size=max_size,
         )
 
     async def get_truecolor(
@@ -634,6 +652,7 @@ class CopernicusService:
         start_date: str | None = None,
         end_date: str | None = None,
         format: str = "png",
+        max_size: int | None = None,
     ) -> dict[str, Any]:
         """Get true-color RGB satellite imagery for a location.
 
@@ -653,6 +672,7 @@ class CopernicusService:
             start_date=start_date,
             end_date=end_date,
             format=format,
+            max_size=max_size,
         )
 
     # Keep old classification methods accessible for tests
