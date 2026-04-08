@@ -27,6 +27,11 @@ _overpass_cache: dict[str, dict] = {}
 _OVERPASS_CACHE_TTL = 86400  # 24 hours
 _OVERPASS_CACHE_MAX_SIZE = 100
 
+# Cooldown after rate limit or failure — skip queries for this duration
+_overpass_last_failure: float = 0.0
+_overpass_cooldown_logged: bool = False
+_OVERPASS_COOLDOWN = 300  # 5 minutes
+
 # Earth radius in km
 EARTH_RADIUS_KM = 6371.0
 
@@ -109,11 +114,17 @@ class OverpassService:
         w = min_lon - pad_deg
         e = max_lon + pad_deg
 
+        global _overpass_last_failure, _overpass_cooldown_logged
+
         # Cache check (round to 1 decimal ~11km)
         cache_key = f"overpass:{s:.1f},{n:.1f},{w:.1f},{e:.1f}"
         cached = _overpass_cache.get(cache_key)
         if cached and (time() - cached["timestamp"] < _OVERPASS_CACHE_TTL):
             return cached["data"]
+
+        # Cooldown: skip queries after rate limit or failure
+        if _overpass_last_failure and (time() - _overpass_last_failure < _OVERPASS_COOLDOWN):
+            return {"facilities": [], "roads": []}
 
         bbox = f"{s},{w},{n},{e}"
         query = f"""
@@ -153,6 +164,12 @@ out center;
                 "data": result,
             }
 
+            # Reset cooldown on success
+            if _overpass_last_failure:
+                logger.info("Overpass recovered")
+                _overpass_last_failure = 0.0
+                _overpass_cooldown_logged = False
+
             fac_count = len(result["facilities"])
             road_count = len(result["roads"])
             logger.info(
@@ -163,7 +180,15 @@ out center;
             return result
 
         except Exception as exc:
-            logger.warning("Overpass query failed: %s", exc)
+            _overpass_last_failure = time()
+            if not _overpass_cooldown_logged:
+                _overpass_cooldown_logged = True
+                logger.warning(
+                    "Overpass unavailable — cooldown active for %ds. "
+                    "Facility enrichment will return nulls. Error: %s",
+                    _OVERPASS_COOLDOWN,
+                    exc,
+                )
             return {"facilities": [], "roads": []}
 
     @staticmethod
