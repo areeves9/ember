@@ -1,6 +1,8 @@
-"""NASA FIRMS fire data service with DBSCAN clustering."""
+"""NASA FIRMS fire data service with DBSCAN clustering and anomaly enrichment."""
 
 import csv
+import math
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import time
 from typing import Any
@@ -12,11 +14,19 @@ from scipy.spatial import ConvexHull
 from sklearn.cluster import DBSCAN
 
 from ember.config import settings
+from ember.logging import get_logger
+
+logger = get_logger(__name__)
 
 # Cache for FIRMS queries (FIRMS updates every ~10 min)
 _fires_cache: dict[str, dict] = {}
 _FIRES_CACHE_TTL = 600  # 10 minutes
 _FIRES_CACHE_MAX_SIZE = 100
+
+# Cache for baseline archive queries (archive is slow-changing)
+_baseline_cache: dict[str, dict] = {}
+_BASELINE_CACHE_TTL = 21600  # 6 hours
+_BASELINE_CACHE_MAX_SIZE = 50
 
 # FIRMS API base URL
 FIRMS_BASE_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
@@ -127,6 +137,11 @@ class FirmsService:
         # Cluster detections using DBSCAN
         clusters = self._cluster_detections(detections, cluster_radius_km)
 
+        # Enrich clusters with anomaly baseline (non-blocking on failure)
+        await self._enrich_baselines(
+            clusters, min_lat, max_lat, min_lon, max_lon, source
+        )
+
         # Convert to GeoJSON for map rendering
         geojson = self._build_geojson(clusters)
 
@@ -152,6 +167,140 @@ class FirmsService:
         _fires_cache[cache_key] = {"timestamp": time(), "data": result}
 
         return result
+
+    # ------------------------------------------------------------------
+    # Anomaly baseline enrichment
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        """Haversine distance in km between two points."""
+        rlat1, rlon1 = math.radians(lat1), math.radians(lon1)
+        rlat2, rlon2 = math.radians(lat2), math.radians(lon2)
+        dlat = rlat2 - rlat1
+        dlon = rlon2 - rlon1
+        a = (
+            math.sin(dlat / 2) ** 2
+            + math.cos(rlat1) * math.cos(rlat2) * math.sin(dlon / 2) ** 2
+        )
+        return EARTH_RADIUS_KM * 2 * math.asin(math.sqrt(a))
+
+    async def _get_archive_detections(
+        self,
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+        source: str,
+        days: int = 10,
+    ) -> list[dict]:
+        """Fetch FIRMS archive detections for a bbox over the past N days.
+
+        Makes 2 FIRMS requests (2 × 5-day windows) to cover 10 days.
+        Results are cached by rounded bbox+source with 6-hour TTL.
+
+        Returns list of detection dicts with lat, lon, frp keys.
+        """
+        # Cache key (round bbox to 1 decimal ~11km for archive grouping)
+        cache_key = (
+            f"baseline:{min_lat:.1f},{max_lat:.1f}"
+            f",{min_lon:.1f},{max_lon:.1f}:{source}"
+        )
+        cached = _baseline_cache.get(cache_key)
+        if cached and (time() - cached["timestamp"] < _BASELINE_CACHE_TTL):
+            return cached["data"]
+
+        # Compute date windows: [10d ago → 5d ago] + [5d ago → today]
+        now = datetime.now(timezone.utc)
+        date_10d = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+        date_5d = (now - timedelta(days=days // 2)).strftime("%Y-%m-%d")
+
+        bbox_str = f"{min_lon},{min_lat},{max_lon},{max_lat}"
+        all_detections: list[dict] = []
+
+        for date_param in [date_10d, date_5d]:
+            url = (
+                f"{FIRMS_BASE_URL}/{self.api_key}/{source}"
+                f"/{bbox_str}/{days // 2}/{date_param}"
+            )
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(url, timeout=self.timeout)
+                    resp.raise_for_status()
+                all_detections.extend(self._parse_csv(resp.text))
+            except Exception as exc:
+                logger.warning("FIRMS archive query failed: %s", exc)
+
+        # Cache results
+        if len(_baseline_cache) >= _BASELINE_CACHE_MAX_SIZE:
+            _baseline_cache.clear()
+        _baseline_cache[cache_key] = {
+            "timestamp": time(),
+            "data": all_detections,
+        }
+
+        return all_detections
+
+    async def _enrich_baselines(
+        self,
+        clusters: list[dict],
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+        source: str,
+        radius_km: float = 5.0,
+    ) -> None:
+        """Enrich clusters with anomaly_factor and baseline_frp_mw.
+
+        Fetches archive detections once for the entire viewport bbox,
+        then filters per-cluster by distance from centroid. Mutates
+        cluster dicts in-place. Gracefully degrades on failure.
+        """
+        try:
+            # Pad bbox by radius_km to catch edge detections
+            pad_deg = radius_km / 111.32
+            archive = await self._get_archive_detections(
+                min_lat - pad_deg,
+                max_lat + pad_deg,
+                min_lon - pad_deg,
+                max_lon + pad_deg,
+                source,
+            )
+        except Exception as exc:
+            logger.warning("Baseline enrichment failed: %s", exc)
+            for cluster in clusters:
+                cluster["anomaly_factor"] = None
+                cluster["baseline_frp_mw"] = None
+            return
+
+        for cluster in clusters:
+            clat = cluster["centroid_lat"]
+            clon = cluster["centroid_lon"]
+            current_frp = cluster["total_frp"]
+
+            # Filter archive detections within radius_km of centroid
+            nearby_frps = [
+                d["frp"]
+                for d in archive
+                if self._haversine_km(d["lat"], d["lon"], clat, clon)
+                <= radius_km
+            ]
+
+            if not nearby_frps:
+                # Novel event — no thermal history
+                cluster["anomaly_factor"] = None
+                cluster["baseline_frp_mw"] = 0
+                continue
+
+            baseline_frp = sum(nearby_frps) / len(nearby_frps)
+            if baseline_frp > 0:
+                cluster["anomaly_factor"] = round(
+                    current_frp / baseline_frp, 1
+                )
+            else:
+                cluster["anomaly_factor"] = None
+            cluster["baseline_frp_mw"] = round(baseline_frp, 1)
 
     def _parse_csv(self, csv_text: str) -> list[dict]:
         """Parse FIRMS CSV response into list of detections."""
@@ -364,6 +513,8 @@ class FirmsService:
                 "area_km2": cluster["area_km2"],
                 "earliest": cluster["earliest"],
                 "latest": cluster["latest"],
+                "anomaly_factor": cluster.get("anomaly_factor"),
+                "baseline_frp_mw": cluster.get("baseline_frp_mw"),
             }
 
             # Point feature for centroid marker
