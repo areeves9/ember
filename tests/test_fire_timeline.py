@@ -129,6 +129,26 @@ class TestPassGrouping:
 
         assert len(result["observations"]) == 2
 
+    @patch("ember.services.firms.httpx.AsyncClient")
+    async def test_3digit_acq_time_parsed_correctly(self, mock_client_class, service):
+        """FIRMS acq_time like '920' (09:20) is zero-padded, not '92:0'."""
+        csv = _make_csv(
+            [
+                _det(35.5, -102.3, 100, "2026-04-06", "920"),
+            ]
+        )
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=MagicMock(text=csv, raise_for_status=MagicMock()))
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+
+        result = await service.get_timeline(lat=35.5, lon=-102.3, hours=24)
+
+        assert result["status"] == "success"
+        assert len(result["observations"]) == 1
+        # Should be 09:20, not 92:0
+        assert "09:20" in result["observations"][0]["time"]
+
 
 # ============================================================================
 # Trend classification

@@ -403,7 +403,8 @@ class FirmsService:
         datetimes = []
         for d in detections:
             if d["acq_date"] and d["acq_time"]:
-                dt_str = f"{d['acq_date']}T{d['acq_time'][:2]}:{d['acq_time'][2:]}:00Z"
+                t = d["acq_time"].zfill(4)
+                dt_str = f"{d['acq_date']}T{t[:2]}:{t[2:]}:00Z"
                 datetimes.append(dt_str)
             elif d["acq_date"]:
                 datetimes.append(d["acq_date"])
@@ -663,7 +664,8 @@ class FirmsService:
         timed: list[tuple[datetime, dict]] = []
         for d in detections:
             if d["acq_date"] and d["acq_time"]:
-                dt_str = f"{d['acq_date']}T{d['acq_time'][:2]}:{d['acq_time'][2:]}:00Z"
+                t = d["acq_time"].zfill(4)
+                dt_str = f"{d['acq_date']}T{t[:2]}:{t[2:]}:00Z"
                 dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
                 timed.append((dt, d))
 
