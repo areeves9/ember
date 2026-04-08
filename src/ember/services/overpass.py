@@ -19,7 +19,10 @@ from ember.logging import get_logger
 
 logger = get_logger(__name__)
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+]
 _OVERPASS_TIMEOUT = 10.0  # seconds — Overpass queries are bounded by [timeout:N]
 
 # Cache for Overpass results (infrastructure is static)
@@ -144,52 +147,62 @@ class OverpassService:
 out center;
 """
 
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    OVERPASS_URL,
-                    data={"data": query},
-                    timeout=self.timeout,
+        # Try each Overpass endpoint until one succeeds
+        last_exc = None
+        for url in OVERPASS_URLS:
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        url,
+                        data={"data": query},
+                        timeout=self.timeout,
+                    )
+                    resp.raise_for_status()
+
+                data = resp.json()
+                result = self._parse_overpass_response(data)
+
+                # Cache
+                if len(_overpass_cache) >= _OVERPASS_CACHE_MAX_SIZE:
+                    _overpass_cache.clear()
+                _overpass_cache[cache_key] = {
+                    "timestamp": time(),
+                    "data": result,
+                }
+
+                # Reset cooldown on success
+                if _overpass_last_failure:
+                    logger.info("Overpass recovered via %s", url)
+                    _overpass_last_failure = 0.0
+                    _overpass_cooldown_logged = False
+
+                fac_count = len(result["facilities"])
+                road_count = len(result["roads"])
+                logger.info(
+                    "Overpass query (%s): %d facilities, %d road segments",
+                    url.split("/")[2],
+                    fac_count,
+                    road_count,
                 )
-                resp.raise_for_status()
+                return result
 
-            data = resp.json()
-            result = self._parse_overpass_response(data)
+            except Exception as exc:
+                last_exc = exc
+                logger.debug("Overpass endpoint %s failed: %s", url, exc)
+                continue
 
-            # Cache
-            if len(_overpass_cache) >= _OVERPASS_CACHE_MAX_SIZE:
-                _overpass_cache.clear()
-            _overpass_cache[cache_key] = {
-                "timestamp": time(),
-                "data": result,
-            }
-
-            # Reset cooldown on success
-            if _overpass_last_failure:
-                logger.info("Overpass recovered")
-                _overpass_last_failure = 0.0
-                _overpass_cooldown_logged = False
-
-            fac_count = len(result["facilities"])
-            road_count = len(result["roads"])
-            logger.info(
-                "Overpass query: %d facilities, %d road segments",
-                fac_count,
-                road_count,
+        # All endpoints failed
+        _overpass_last_failure = time()
+        if not _overpass_cooldown_logged:
+            _overpass_cooldown_logged = True
+            logger.warning(
+                "All Overpass endpoints unavailable — cooldown active "
+                "for %ds. Facility enrichment will return nulls. "
+                "Last error: %s",
+                _OVERPASS_COOLDOWN,
+                last_exc,
             )
-            return result
-
-        except Exception as exc:
-            _overpass_last_failure = time()
-            if not _overpass_cooldown_logged:
-                _overpass_cooldown_logged = True
-                logger.warning(
-                    "Overpass unavailable — cooldown active for %ds. "
-                    "Facility enrichment will return nulls. Error: %s",
-                    _OVERPASS_COOLDOWN,
-                    exc,
-                )
-            return {"facilities": [], "roads": []}
+        return {"facilities": [], "roads": []}
 
     @staticmethod
     def _parse_overpass_response(
