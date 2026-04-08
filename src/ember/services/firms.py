@@ -15,6 +15,7 @@ from sklearn.cluster import DBSCAN
 
 from ember.config import settings
 from ember.logging import get_logger
+from ember.services.overpass import overpass_service
 
 logger = get_logger(__name__)
 
@@ -147,6 +148,9 @@ class FirmsService:
 
         # Enrich clusters with anomaly baseline (non-blocking on failure)
         await self._enrich_baselines(clusters, min_lat, max_lat, min_lon, max_lon, source)
+
+        # Enrich clusters with facility + road proximity (non-blocking on failure)
+        await self._enrich_facility_proximity(clusters, min_lat, max_lat, min_lon, max_lon)
 
         # Convert to GeoJSON for map rendering
         geojson = self._build_geojson(clusters)
@@ -295,6 +299,54 @@ class FirmsService:
             else:
                 cluster["anomaly_factor"] = None
             cluster["baseline_frp_mw"] = round(baseline_frp, 1)
+
+    async def _enrich_facility_proximity(
+        self,
+        clusters: list[dict],
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+    ) -> None:
+        """Enrich clusters with nearest facility and road distances.
+
+        Queries OverpassService once for the viewport bbox, then finds
+        nearest facility + road per cluster centroid. Mutates cluster
+        dicts in-place. Gracefully degrades on failure.
+        """
+
+        try:
+            infra = await overpass_service.query_infrastructure(min_lat, max_lat, min_lon, max_lon)
+        except Exception as exc:
+            logger.warning("Facility proximity enrichment failed: %s", exc)
+            for cluster in clusters:
+                cluster["nearest_facility_km"] = None
+                cluster["nearest_facility_type"] = None
+                cluster["nearest_facility_name"] = None
+                cluster["nearby_facilities"] = []
+                cluster["nearest_road_km"] = None
+            return
+
+        facilities = infra["facilities"]
+        roads = infra["roads"]
+
+        for cluster in clusters:
+            clat = cluster["centroid_lat"]
+            clon = cluster["centroid_lon"]
+
+            fac_result = overpass_service.find_nearest_facilities(clat, clon, facilities)
+            nearest = fac_result["nearest"]
+            if nearest:
+                cluster["nearest_facility_km"] = nearest["km"]
+                cluster["nearest_facility_type"] = nearest["type"]
+                cluster["nearest_facility_name"] = nearest["name"]
+            else:
+                cluster["nearest_facility_km"] = None
+                cluster["nearest_facility_type"] = None
+                cluster["nearest_facility_name"] = None
+            cluster["nearby_facilities"] = fac_result["nearby"]
+
+            cluster["nearest_road_km"] = overpass_service.find_nearest_road(clat, clon, roads)
 
     def _parse_csv(self, csv_text: str) -> list[dict]:
         """Parse FIRMS CSV response into list of detections."""
@@ -502,6 +554,11 @@ class FirmsService:
                 "latest": cluster["latest"],
                 "anomaly_factor": cluster.get("anomaly_factor"),
                 "baseline_frp_mw": cluster.get("baseline_frp_mw"),
+                "nearest_facility_km": cluster.get("nearest_facility_km"),
+                "nearest_facility_type": cluster.get("nearest_facility_type"),
+                "nearest_facility_name": cluster.get("nearest_facility_name"),
+                "nearest_road_km": cluster.get("nearest_road_km"),
+                "nearby_facilities": cluster.get("nearby_facilities", []),
             }
 
             # Point feature for centroid marker
