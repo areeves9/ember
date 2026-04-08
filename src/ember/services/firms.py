@@ -1,6 +1,8 @@
-"""NASA FIRMS fire data service with DBSCAN clustering."""
+"""NASA FIRMS fire data service with DBSCAN clustering and anomaly enrichment."""
 
 import csv
+import math
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import time
 from typing import Any
@@ -12,11 +14,27 @@ from scipy.spatial import ConvexHull
 from sklearn.cluster import DBSCAN
 
 from ember.config import settings
+from ember.logging import get_logger
+
+logger = get_logger(__name__)
 
 # Cache for FIRMS queries (FIRMS updates every ~10 min)
 _fires_cache: dict[str, dict] = {}
 _FIRES_CACHE_TTL = 600  # 10 minutes
 _FIRES_CACHE_MAX_SIZE = 100
+
+# Cache for baseline archive queries (archive is slow-changing)
+_baseline_cache: dict[str, dict] = {}
+_BASELINE_CACHE_TTL = 21600  # 6 hours
+_BASELINE_CACHE_MAX_SIZE = 50
+
+# Cache for timeline queries (changes with each satellite pass)
+_timeline_cache: dict[str, dict] = {}
+_TIMELINE_CACHE_TTL = 3600  # 1 hour
+_TIMELINE_CACHE_MAX_SIZE = 100
+
+# Pass grouping: detections from same satellite within this window are one pass
+_PASS_GROUP_MINUTES = 15
 
 # FIRMS API base URL
 FIRMS_BASE_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
@@ -127,6 +145,9 @@ class FirmsService:
         # Cluster detections using DBSCAN
         clusters = self._cluster_detections(detections, cluster_radius_km)
 
+        # Enrich clusters with anomaly baseline (non-blocking on failure)
+        await self._enrich_baselines(clusters, min_lat, max_lat, min_lon, max_lon, source)
+
         # Convert to GeoJSON for map rendering
         geojson = self._build_geojson(clusters)
 
@@ -153,6 +174,128 @@ class FirmsService:
 
         return result
 
+    # ------------------------------------------------------------------
+    # Anomaly baseline enrichment
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        """Haversine distance in km between two points."""
+        rlat1, rlon1 = math.radians(lat1), math.radians(lon1)
+        rlat2, rlon2 = math.radians(lat2), math.radians(lon2)
+        dlat = rlat2 - rlat1
+        dlon = rlon2 - rlon1
+        a = math.sin(dlat / 2) ** 2 + math.cos(rlat1) * math.cos(rlat2) * math.sin(dlon / 2) ** 2
+        return EARTH_RADIUS_KM * 2 * math.asin(math.sqrt(a))
+
+    async def _get_archive_detections(
+        self,
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+        source: str,
+        days: int = 10,
+    ) -> list[dict]:
+        """Fetch FIRMS archive detections for a bbox over the past N days.
+
+        Makes 2 FIRMS requests (2 × 5-day windows) to cover 10 days.
+        Results are cached by rounded bbox+source with 6-hour TTL.
+
+        Returns list of detection dicts with lat, lon, frp keys.
+        """
+        # Cache key (round bbox to 1 decimal ~11km for archive grouping)
+        cache_key = f"baseline:{min_lat:.1f},{max_lat:.1f},{min_lon:.1f},{max_lon:.1f}:{source}"
+        cached = _baseline_cache.get(cache_key)
+        if cached and (time() - cached["timestamp"] < _BASELINE_CACHE_TTL):
+            return cached["data"]
+
+        # Compute date windows: [10d ago → 5d ago] + [5d ago → today]
+        now = datetime.now(timezone.utc)
+        date_10d = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+        date_5d = (now - timedelta(days=days // 2)).strftime("%Y-%m-%d")
+
+        bbox_str = f"{min_lon},{min_lat},{max_lon},{max_lat}"
+        all_detections: list[dict] = []
+
+        for date_param in [date_10d, date_5d]:
+            url = f"{FIRMS_BASE_URL}/{self.api_key}/{source}/{bbox_str}/{days // 2}/{date_param}"
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(url, timeout=self.timeout)
+                    resp.raise_for_status()
+                all_detections.extend(self._parse_csv(resp.text))
+            except Exception as exc:
+                logger.warning("FIRMS archive query failed: %s", exc)
+
+        # Cache results
+        if len(_baseline_cache) >= _BASELINE_CACHE_MAX_SIZE:
+            _baseline_cache.clear()
+        _baseline_cache[cache_key] = {
+            "timestamp": time(),
+            "data": all_detections,
+        }
+
+        return all_detections
+
+    async def _enrich_baselines(
+        self,
+        clusters: list[dict],
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+        source: str,
+        radius_km: float = 5.0,
+    ) -> None:
+        """Enrich clusters with anomaly_factor and baseline_frp_mw.
+
+        Fetches archive detections once for the entire viewport bbox,
+        then filters per-cluster by distance from centroid. Mutates
+        cluster dicts in-place. Gracefully degrades on failure.
+        """
+        try:
+            # Pad bbox by radius_km to catch edge detections
+            pad_deg = radius_km / 111.32
+            archive = await self._get_archive_detections(
+                min_lat - pad_deg,
+                max_lat + pad_deg,
+                min_lon - pad_deg,
+                max_lon + pad_deg,
+                source,
+            )
+        except Exception as exc:
+            logger.warning("Baseline enrichment failed: %s", exc)
+            for cluster in clusters:
+                cluster["anomaly_factor"] = None
+                cluster["baseline_frp_mw"] = None
+            return
+
+        for cluster in clusters:
+            clat = cluster["centroid_lat"]
+            clon = cluster["centroid_lon"]
+            current_frp = cluster["total_frp"]
+
+            # Filter archive detections within radius_km of centroid
+            nearby_frps = [
+                d["frp"]
+                for d in archive
+                if self._haversine_km(d["lat"], d["lon"], clat, clon) <= radius_km
+            ]
+
+            if not nearby_frps:
+                # Novel event — no thermal history
+                cluster["anomaly_factor"] = None
+                cluster["baseline_frp_mw"] = 0
+                continue
+
+            baseline_frp = sum(nearby_frps) / len(nearby_frps)
+            if baseline_frp > 0:
+                cluster["anomaly_factor"] = round(current_frp / baseline_frp, 1)
+            else:
+                cluster["anomaly_factor"] = None
+            cluster["baseline_frp_mw"] = round(baseline_frp, 1)
+
     def _parse_csv(self, csv_text: str) -> list[dict]:
         """Parse FIRMS CSV response into list of detections."""
         detections = []
@@ -163,13 +306,9 @@ class FirmsService:
                 detection = {
                     "lat": float(row.get("latitude", 0)),
                     "lon": float(row.get("longitude", 0)),
-                    "brightness": float(
-                        row.get("bright_ti4", 0) or row.get("brightness", 0)
-                    ),
+                    "brightness": float(row.get("bright_ti4", 0) or row.get("brightness", 0)),
                     "frp": float(row.get("frp", 0) or 0),
-                    "confidence": self._normalize_confidence(
-                        row.get("confidence", "nominal")
-                    ),
+                    "confidence": self._normalize_confidence(row.get("confidence", "nominal")),
                     "acq_date": row.get("acq_date", ""),
                     "acq_time": row.get("acq_time", ""),
                     "satellite": row.get("satellite", ""),
@@ -257,16 +396,15 @@ class FirmsService:
         confidences = [confidence_map.get(d["confidence"], 2) for d in detections]
         avg_conf_num = sum(confidences) / len(confidences)
         avg_confidence = (
-            "low"
-            if avg_conf_num < 1.5
-            else ("high" if avg_conf_num > 2.5 else "nominal")
+            "low" if avg_conf_num < 1.5 else ("high" if avg_conf_num > 2.5 else "nominal")
         )
 
         # Time range
         datetimes = []
         for d in detections:
             if d["acq_date"] and d["acq_time"]:
-                dt_str = f"{d['acq_date']}T{d['acq_time'][:2]}:{d['acq_time'][2:]}:00Z"
+                t = d["acq_time"].zfill(4)
+                dt_str = f"{d['acq_date']}T{t[:2]}:{t[2:]}:00Z"
                 datetimes.append(dt_str)
             elif d["acq_date"]:
                 datetimes.append(d["acq_date"])
@@ -313,9 +451,7 @@ class FirmsService:
             return None
 
         try:
-            points = np.array(
-                list(zip(lons, lats))
-            )  # scipy expects (x, y) = (lon, lat)
+            points = np.array(list(zip(lons, lats)))  # scipy expects (x, y) = (lon, lat)
             hull = ConvexHull(points)
             vertices = [(lats[i], lons[i]) for i in hull.vertices]
             # Close the polygon
@@ -364,6 +500,8 @@ class FirmsService:
                 "area_km2": cluster["area_km2"],
                 "earliest": cluster["earliest"],
                 "latest": cluster["latest"],
+                "anomaly_factor": cluster.get("anomaly_factor"),
+                "baseline_frp_mw": cluster.get("baseline_frp_mw"),
             }
 
             # Point feature for centroid marker
@@ -401,6 +539,230 @@ class FirmsService:
             "type": "FeatureCollection",
             "features": features,
         }
+
+    # ------------------------------------------------------------------
+    # Thermal timeline
+    # ------------------------------------------------------------------
+
+    async def get_timeline(
+        self,
+        lat: float,
+        lon: float,
+        radius_km: float = 5.0,
+        hours: int = 72,
+        source: str = "VIIRS_SNPP_NRT",
+    ) -> dict[str, Any]:
+        """Get thermal timeline for a location — FRP over time by satellite pass.
+
+        Args:
+            lat: Center latitude
+            lon: Center longitude
+            radius_km: Search radius in km (default 5)
+            hours: Lookback window (default 72, max 120 = 5 days)
+            source: Satellite source filter
+
+        Returns:
+            Dict with observations grouped by satellite pass, trend, peak.
+        """
+        if not self.api_key:
+            raise ValueError("FIRMS_MAP_KEY not configured")
+
+        hours = max(1, min(120, hours))
+
+        # Cache check
+        cache_key = f"timeline:{lat:.3f},{lon:.3f}:{radius_km}:{hours}:{source}"
+        cached = _timeline_cache.get(cache_key)
+        if cached and (time() - cached["timestamp"] < _TIMELINE_CACHE_TTL):
+            return cached["data"]
+
+        # Compute bbox from lat/lon + radius
+        pad_deg = radius_km / 111.32
+        min_lat = lat - pad_deg
+        max_lat = lat + pad_deg
+        min_lon = lon - pad_deg
+        max_lon = lon + pad_deg
+        bbox_str = f"{min_lon},{min_lat},{max_lon},{max_lat}"
+
+        # Compute days needed (ceil to whole days, max 5 per request)
+        days = max(1, min(5, -(-hours // 24)))  # ceil division
+
+        # Fetch detections (1-2 requests depending on hours)
+        all_detections: list[dict] = []
+        now = datetime.now(timezone.utc)
+
+        if hours <= 120:
+            # Up to 5 days fits in one request
+            date_start = (now - timedelta(hours=hours)).strftime("%Y-%m-%d")
+            url = f"{FIRMS_BASE_URL}/{self.api_key}/{source}/{bbox_str}/{days}/{date_start}"
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(url, timeout=self.timeout)
+                    resp.raise_for_status()
+                all_detections = self._parse_csv(resp.text)
+            except Exception as exc:
+                logger.warning("FIRMS timeline query failed: %s", exc)
+                raise ValueError(f"FIRMS API error: {exc}") from exc
+
+        # Filter by radius
+        nearby = [
+            d
+            for d in all_detections
+            if self._haversine_km(d["lat"], d["lon"], lat, lon) <= radius_km
+        ]
+
+        if not nearby:
+            result: dict[str, Any] = {
+                "status": "success",
+                "first_detected": None,
+                "hours_active": 0,
+                "observations": [],
+                "trend": None,
+                "peak": None,
+                "source": "NASA FIRMS",
+            }
+            self._cache_timeline(cache_key, result)
+            return result
+
+        # Group by satellite pass
+        observations = self._group_by_pass(nearby)
+
+        # Compute metadata
+        first_detected = observations[0]["time"]
+        peak = max(observations, key=lambda o: o["frp_mw"])
+
+        # Hours active
+        first_dt = datetime.fromisoformat(first_detected.replace("Z", "+00:00"))
+        hours_active = round((now - first_dt).total_seconds() / 3600, 1)
+
+        # Trend
+        trend = self._classify_trend(observations)
+
+        result = {
+            "status": "success",
+            "first_detected": first_detected,
+            "hours_active": hours_active,
+            "observations": observations,
+            "trend": trend,
+            "peak": {
+                "time": peak["time"],
+                "frp_mw": peak["frp_mw"],
+                "satellite": peak["satellite"],
+            },
+            "source": "NASA FIRMS",
+        }
+
+        self._cache_timeline(cache_key, result)
+        return result
+
+    def _group_by_pass(self, detections: list[dict]) -> list[dict]:
+        """Group detections into satellite passes.
+
+        Detections from the same satellite within 15 minutes are one pass.
+        Returns list of observations sorted by time.
+        """
+        # Parse and sort by datetime
+        timed: list[tuple[datetime, dict]] = []
+        for d in detections:
+            if d["acq_date"] and d["acq_time"]:
+                t = d["acq_time"].zfill(4)
+                dt_str = f"{d['acq_date']}T{t[:2]}:{t[2:]}:00Z"
+                dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+                timed.append((dt, d))
+
+        if not timed:
+            return []
+
+        timed.sort(key=lambda x: x[0])
+
+        # Group by satellite + time proximity
+        passes: list[dict] = []
+        current_group: list[tuple[datetime, dict]] = [timed[0]]
+
+        for i in range(1, len(timed)):
+            dt, det = timed[i]
+            prev_dt, prev_det = current_group[-1]
+            same_sat = det["satellite"] == prev_det["satellite"]
+            within_window = (dt - prev_dt).total_seconds() <= _PASS_GROUP_MINUTES * 60
+
+            if same_sat and within_window:
+                current_group.append((dt, det))
+            else:
+                passes.append(self._aggregate_pass(current_group))
+                current_group = [(dt, det)]
+
+        passes.append(self._aggregate_pass(current_group))
+        passes.sort(key=lambda p: p["time"])
+        return passes
+
+    @staticmethod
+    def _aggregate_pass(
+        group: list[tuple[datetime, dict]],
+    ) -> dict:
+        """Aggregate a group of detections into one observation."""
+        frps = [d["frp"] for _, d in group]
+        mid_dt = group[len(group) // 2][0]
+        satellite = group[0][1]["satellite"]
+
+        # Map satellite codes to readable names
+        sat_names = {
+            "N": "VIIRS NOAA-20",
+            "1": "VIIRS NOAA-21",
+            "N20": "VIIRS NOAA-20",
+            "N21": "VIIRS NOAA-21",
+            "Terra": "MODIS Terra",
+            "Aqua": "MODIS Aqua",
+        }
+
+        return {
+            "time": mid_dt.strftime("%Y-%m-%dT%H:%MZ"),
+            "frp_mw": round(sum(frps), 1),
+            "detections": len(group),
+            "satellite": sat_names.get(satellite, satellite),
+        }
+
+    @staticmethod
+    def _classify_trend(observations: list[dict]) -> str:
+        """Classify FRP trend from observations.
+
+        Uses last 3 observations to determine direction.
+        """
+        if len(observations) < 2:
+            return "sporadic"
+
+        recent = observations[-3:] if len(observations) >= 3 else observations
+        frps = [o["frp_mw"] for o in recent]
+
+        # Check monotonic trends
+        increasing = all(frps[i] < frps[i + 1] for i in range(len(frps) - 1))
+        decreasing = all(frps[i] > frps[i + 1] for i in range(len(frps) - 1))
+
+        if increasing:
+            return "escalating"
+        if decreasing:
+            return "declining"
+
+        # Check stability (within ±20%) before peaked — small variations aren't peaks
+        mean_frp = sum(frps) / len(frps)
+        if mean_frp > 0:
+            all_within = all(abs(f - mean_frp) / mean_frp <= 0.2 for f in frps)
+            if all_within:
+                return "stable"
+
+        # Check if peaked (was rising, now falling)
+        if len(observations) >= 3:
+            all_frps = [o["frp_mw"] for o in observations]
+            peak_idx = all_frps.index(max(all_frps))
+            if 0 < peak_idx < len(all_frps) - 1:
+                return "peaked"
+
+        return "sporadic"
+
+    @staticmethod
+    def _cache_timeline(cache_key: str, data: dict) -> None:
+        """Store timeline result in cache."""
+        if len(_timeline_cache) >= _TIMELINE_CACHE_MAX_SIZE:
+            _timeline_cache.clear()
+        _timeline_cache[cache_key] = {"timestamp": time(), "data": data}
 
 
 # Singleton instance

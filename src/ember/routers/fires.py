@@ -17,9 +17,7 @@ async def get_fires(
     min_lon: Annotated[float, Query(ge=-180, le=180, description="Western boundary")],
     max_lon: Annotated[float, Query(ge=-180, le=180, description="Eastern boundary")],
     source: Annotated[str, Query(description="Satellite source")] = "VIIRS_SNPP_NRT",
-    days_back: Annotated[
-        int, Query(ge=1, le=10, description="Days of historical data")
-    ] = 2,
+    days_back: Annotated[int, Query(ge=1, le=10, description="Days of historical data")] = 2,
     _user: dict = require_auth,
 ):
     """
@@ -41,6 +39,41 @@ async def get_fires(
             max_lon=max_lon,
             source=source,
             days_back=days_back,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"FIRMS API error: {str(e)}")
+
+
+@router.get("/timeline")
+async def get_fire_timeline(
+    lat: Annotated[float, Query(ge=-90, le=90, description="Center latitude")],
+    lon: Annotated[float, Query(ge=-180, le=180, description="Center longitude")],
+    radius_km: Annotated[float, Query(ge=1, le=50, description="Search radius in km")] = 5.0,
+    hours: Annotated[int, Query(ge=1, le=120, description="Lookback window in hours")] = 72,
+    source: Annotated[str, Query(description="Satellite source")] = "VIIRS_SNPP_NRT",
+    _user: dict = require_auth,
+):
+    """Get thermal timeline for a location — FRP evolution over time.
+
+    Returns observations grouped by satellite pass with trend analysis.
+    Useful for answering: When did this start? Is it growing or declining?
+    """
+    if source not in SATELLITE_SOURCES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid source. Must be one of: {SATELLITE_SOURCES}",
+        )
+
+    try:
+        result = await firms_service.get_timeline(
+            lat=lat,
+            lon=lon,
+            radius_km=radius_km,
+            hours=hours,
+            source=source,
         )
         return result
     except ValueError as e:
