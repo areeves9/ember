@@ -369,3 +369,197 @@ class TestTruecolorCog:
             },
         )
         assert resp.status_code == 400
+
+
+# =============================================================================
+# GET /imagery/ndvi-cog
+# =============================================================================
+
+
+class TestNdviCog:
+    def test_returns_ndvi_with_interpretation(self, client, mock_scene, mock_index_result):
+        with patch(
+            "ember.routers.imagery.stac_service.search_scenes",
+            new_callable=AsyncMock,
+            return_value=[mock_scene],
+        ), patch(
+            "ember.routers.imagery.sentinel_cog_service.compute_index",
+            new_callable=AsyncMock,
+            return_value=mock_index_result,
+        ):
+            resp = client.get(
+                "/api/v1/imagery/ndvi-cog",
+                params={
+                    "min_lon": -118.5,
+                    "min_lat": 34.0,
+                    "max_lon": -118.0,
+                    "max_lat": 34.5,
+                },
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "success"
+        assert "ndvi" in data
+        assert "mean" in data["ndvi"]
+        assert "vegetation_status" in data["ndvi"]
+        assert data["datetime"] == "2026-03-15T18:32:15Z"
+        assert data["cloud_cover"] == 8.2
+        assert "date_range" in data
+
+    def test_vegetation_status_thresholds(self, client, mock_scene):
+        """Verify interpretation matches Copernicus thresholds."""
+        for mean, expected_status in [
+            (0.05, "Bare/Barren"),
+            (0.15, "Sparse Vegetation"),
+            (0.3, "Moderate Vegetation"),
+            (0.5, "Healthy Vegetation"),
+            (0.7, "Dense Vegetation"),
+        ]:
+            index_result = {
+                "status": "success",
+                "scene_id": mock_scene.id,
+                "index": "NDVI",
+                "bbox": [-118.5, 34.0, -118.0, 34.5],
+                "bands_used": ["B08", "B04"],
+                "stats": {"min": mean - 0.1, "max": mean + 0.1, "mean": mean},
+                "source": "Sentinel-2 L2A (AWS COG)",
+            }
+            with patch(
+                "ember.routers.imagery.stac_service.search_scenes",
+                new_callable=AsyncMock,
+                return_value=[mock_scene],
+            ), patch(
+                "ember.routers.imagery.sentinel_cog_service.compute_index",
+                new_callable=AsyncMock,
+                return_value=index_result,
+            ):
+                resp = client.get(
+                    "/api/v1/imagery/ndvi-cog",
+                    params={
+                        "min_lon": -118.5,
+                        "min_lat": 34.0,
+                        "max_lon": -118.0,
+                        "max_lat": 34.5,
+                    },
+                )
+            assert resp.json()["ndvi"]["vegetation_status"] == expected_status
+
+    def test_returns_404_when_no_scenes(self, client):
+        with patch(
+            "ember.routers.imagery.stac_service.search_scenes",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
+            resp = client.get(
+                "/api/v1/imagery/ndvi-cog",
+                params={
+                    "min_lon": -118.5,
+                    "min_lat": 34.0,
+                    "max_lon": -118.0,
+                    "max_lat": 34.5,
+                },
+            )
+        assert resp.status_code == 404
+
+    def test_validates_format(self, client):
+        resp = client.get(
+            "/api/v1/imagery/ndvi-cog",
+            params={
+                "min_lon": -118.5,
+                "min_lat": 34.0,
+                "max_lon": -118.0,
+                "max_lat": 34.5,
+                "format": "png",
+            },
+        )
+        assert resp.status_code == 400
+
+
+# =============================================================================
+# GET /imagery/ndmi-cog
+# =============================================================================
+
+
+class TestNdmiCog:
+    def test_returns_ndmi_with_interpretation(self, client, mock_scene, mock_index_result):
+        ndmi_result = {**mock_index_result, "index": "NDMI", "bands_used": ["B08", "B11"]}
+        with patch(
+            "ember.routers.imagery.stac_service.search_scenes",
+            new_callable=AsyncMock,
+            return_value=[mock_scene],
+        ), patch(
+            "ember.routers.imagery.sentinel_cog_service.compute_index",
+            new_callable=AsyncMock,
+            return_value=ndmi_result,
+        ):
+            resp = client.get(
+                "/api/v1/imagery/ndmi-cog",
+                params={
+                    "min_lon": -118.5,
+                    "min_lat": 34.0,
+                    "max_lon": -118.0,
+                    "max_lat": 34.5,
+                },
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "success"
+        assert "ndmi" in data
+        assert "moisture_status" in data["ndmi"]
+        assert "fire_risk" in data["ndmi"]
+        assert data["datetime"] == "2026-03-15T18:32:15Z"
+
+    def test_fire_risk_thresholds(self, client, mock_scene):
+        """Verify fire risk interpretation matches Copernicus thresholds."""
+        for mean, expected_risk in [
+            (-0.2, "High"),
+            (0.0, "Moderate"),
+            (0.2, "Low"),
+        ]:
+            index_result = {
+                "status": "success",
+                "scene_id": mock_scene.id,
+                "index": "NDMI",
+                "bbox": [-118.5, 34.0, -118.0, 34.5],
+                "bands_used": ["B08", "B11"],
+                "stats": {"min": mean - 0.1, "max": mean + 0.1, "mean": mean},
+                "source": "Sentinel-2 L2A (AWS COG)",
+            }
+            with patch(
+                "ember.routers.imagery.stac_service.search_scenes",
+                new_callable=AsyncMock,
+                return_value=[mock_scene],
+            ), patch(
+                "ember.routers.imagery.sentinel_cog_service.compute_index",
+                new_callable=AsyncMock,
+                return_value=index_result,
+            ):
+                resp = client.get(
+                    "/api/v1/imagery/ndmi-cog",
+                    params={
+                        "min_lon": -118.5,
+                        "min_lat": 34.0,
+                        "max_lon": -118.0,
+                        "max_lat": 34.5,
+                    },
+                )
+            assert resp.json()["ndmi"]["fire_risk"] == expected_risk
+
+    def test_returns_404_when_no_scenes(self, client):
+        with patch(
+            "ember.routers.imagery.stac_service.search_scenes",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
+            resp = client.get(
+                "/api/v1/imagery/ndmi-cog",
+                params={
+                    "min_lon": -118.5,
+                    "min_lat": 34.0,
+                    "max_lon": -118.0,
+                    "max_lat": 34.5,
+                },
+            )
+        assert resp.status_code == 404
