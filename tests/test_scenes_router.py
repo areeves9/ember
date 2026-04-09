@@ -164,14 +164,17 @@ class TestSearchScenes:
 
 class TestGetSceneBands:
     def test_returns_truecolor(self, client, mock_scene, mock_truecolor_result):
-        with patch(
-            "ember.routers.scenes.stac_service.get_scene",
-            new_callable=AsyncMock,
-            return_value=mock_scene,
-        ), patch(
-            "ember.routers.scenes.sentinel_cog_service.get_truecolor",
-            new_callable=AsyncMock,
-            return_value=mock_truecolor_result,
+        with (
+            patch(
+                "ember.routers.scenes.stac_service.get_scene",
+                new_callable=AsyncMock,
+                return_value=mock_scene,
+            ),
+            patch(
+                "ember.routers.scenes.sentinel_cog_service.get_truecolor",
+                new_callable=AsyncMock,
+                return_value=mock_truecolor_result,
+            ),
         ):
             resp = client.get(
                 "/api/v1/scenes/S2A_11SLT_20260315_0_L2A/bands",
@@ -233,14 +236,17 @@ class TestGetSceneBands:
 
 class TestGetSceneIndex:
     def test_returns_ndvi(self, client, mock_scene, mock_index_result):
-        with patch(
-            "ember.routers.scenes.stac_service.get_scene",
-            new_callable=AsyncMock,
-            return_value=mock_scene,
-        ), patch(
-            "ember.routers.scenes.sentinel_cog_service.compute_index",
-            new_callable=AsyncMock,
-            return_value=mock_index_result,
+        with (
+            patch(
+                "ember.routers.scenes.stac_service.get_scene",
+                new_callable=AsyncMock,
+                return_value=mock_scene,
+            ),
+            patch(
+                "ember.routers.scenes.sentinel_cog_service.compute_index",
+                new_callable=AsyncMock,
+                return_value=mock_index_result,
+            ),
         ):
             resp = client.get(
                 "/api/v1/scenes/S2A_11SLT_20260315_0_L2A/index",
@@ -304,14 +310,17 @@ class TestGetSceneIndex:
 
 class TestTruecolorCog:
     def test_returns_image(self, client, mock_scene, mock_truecolor_result):
-        with patch(
-            "ember.routers.imagery.stac_service.search_scenes",
-            new_callable=AsyncMock,
-            return_value=[mock_scene],
-        ), patch(
-            "ember.routers.imagery.sentinel_cog_service.get_truecolor",
-            new_callable=AsyncMock,
-            return_value=mock_truecolor_result,
+        with (
+            patch(
+                "ember.routers.imagery.stac_service.search_coverage",
+                new_callable=AsyncMock,
+                return_value=[mock_scene],
+            ),
+            patch(
+                "ember.routers.imagery.sentinel_cog_service.get_truecolor",
+                new_callable=AsyncMock,
+                return_value=mock_truecolor_result,
+            ),
         ):
             resp = client.get(
                 "/api/v1/imagery/truecolor-cog",
@@ -330,7 +339,7 @@ class TestTruecolorCog:
 
     def test_returns_404_when_no_scenes(self, client):
         with patch(
-            "ember.routers.imagery.stac_service.search_scenes",
+            "ember.routers.imagery.stac_service.search_coverage",
             new_callable=AsyncMock,
             return_value=[],
         ):
@@ -378,14 +387,17 @@ class TestTruecolorCog:
 
 class TestNdviCog:
     def test_returns_ndvi_with_interpretation(self, client, mock_scene, mock_index_result):
-        with patch(
-            "ember.routers.imagery.stac_service.search_scenes",
-            new_callable=AsyncMock,
-            return_value=[mock_scene],
-        ), patch(
-            "ember.routers.imagery.sentinel_cog_service.compute_index",
-            new_callable=AsyncMock,
-            return_value=mock_index_result,
+        with (
+            patch(
+                "ember.routers.imagery.stac_service.search_coverage",
+                new_callable=AsyncMock,
+                return_value=[mock_scene],
+            ),
+            patch(
+                "ember.routers.imagery.sentinel_cog_service.compute_index",
+                new_callable=AsyncMock,
+                return_value=mock_index_result,
+            ),
         ):
             resp = client.get(
                 "/api/v1/imagery/ndvi-cog",
@@ -425,14 +437,17 @@ class TestNdviCog:
                 "stats": {"min": mean - 0.1, "max": mean + 0.1, "mean": mean},
                 "source": "Sentinel-2 L2A (AWS COG)",
             }
-            with patch(
-                "ember.routers.imagery.stac_service.search_scenes",
-                new_callable=AsyncMock,
-                return_value=[mock_scene],
-            ), patch(
-                "ember.routers.imagery.sentinel_cog_service.compute_index",
-                new_callable=AsyncMock,
-                return_value=index_result,
+            with (
+                patch(
+                    "ember.routers.imagery.stac_service.search_coverage",
+                    new_callable=AsyncMock,
+                    return_value=[mock_scene],
+                ),
+                patch(
+                    "ember.routers.imagery.sentinel_cog_service.compute_index",
+                    new_callable=AsyncMock,
+                    return_value=index_result,
+                ),
             ):
                 resp = client.get(
                     "/api/v1/imagery/ndvi-cog",
@@ -447,7 +462,7 @@ class TestNdviCog:
 
     def test_returns_404_when_no_scenes(self, client):
         with patch(
-            "ember.routers.imagery.stac_service.search_scenes",
+            "ember.routers.imagery.stac_service.search_coverage",
             new_callable=AsyncMock,
             return_value=[],
         ):
@@ -484,14 +499,17 @@ class TestNdviCog:
 class TestNdmiCog:
     def test_returns_ndmi_with_interpretation(self, client, mock_scene, mock_index_result):
         ndmi_result = {**mock_index_result, "index": "NDMI", "bands_used": ["B08", "B11"]}
-        with patch(
-            "ember.routers.imagery.stac_service.search_scenes",
-            new_callable=AsyncMock,
-            return_value=[mock_scene],
-        ), patch(
-            "ember.routers.imagery.sentinel_cog_service.compute_index",
-            new_callable=AsyncMock,
-            return_value=ndmi_result,
+        with (
+            patch(
+                "ember.routers.imagery.stac_service.search_coverage",
+                new_callable=AsyncMock,
+                return_value=[mock_scene],
+            ),
+            patch(
+                "ember.routers.imagery.sentinel_cog_service.compute_index",
+                new_callable=AsyncMock,
+                return_value=ndmi_result,
+            ),
         ):
             resp = client.get(
                 "/api/v1/imagery/ndmi-cog",
@@ -527,14 +545,17 @@ class TestNdmiCog:
                 "stats": {"min": mean - 0.1, "max": mean + 0.1, "mean": mean},
                 "source": "Sentinel-2 L2A (AWS COG)",
             }
-            with patch(
-                "ember.routers.imagery.stac_service.search_scenes",
-                new_callable=AsyncMock,
-                return_value=[mock_scene],
-            ), patch(
-                "ember.routers.imagery.sentinel_cog_service.compute_index",
-                new_callable=AsyncMock,
-                return_value=index_result,
+            with (
+                patch(
+                    "ember.routers.imagery.stac_service.search_coverage",
+                    new_callable=AsyncMock,
+                    return_value=[mock_scene],
+                ),
+                patch(
+                    "ember.routers.imagery.sentinel_cog_service.compute_index",
+                    new_callable=AsyncMock,
+                    return_value=index_result,
+                ),
             ):
                 resp = client.get(
                     "/api/v1/imagery/ndmi-cog",
@@ -549,7 +570,7 @@ class TestNdmiCog:
 
     def test_returns_404_when_no_scenes(self, client):
         with patch(
-            "ember.routers.imagery.stac_service.search_scenes",
+            "ember.routers.imagery.stac_service.search_coverage",
             new_callable=AsyncMock,
             return_value=[],
         ):

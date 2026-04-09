@@ -209,6 +209,8 @@ async def _find_coverage_scenes(
         raise HTTPException(status_code=400, detail="min_lat must be less than max_lat")
     if min_lon >= max_lon:
         raise HTTPException(status_code=400, detail="min_lon must be less than max_lon")
+    if (max_lat - min_lat) > 10 or (max_lon - min_lon) > 10:
+        raise HTTPException(status_code=400, detail="Bbox too large (max 10 degrees per dimension)")
 
     now = datetime.now(timezone.utc)
     if end_date is None:

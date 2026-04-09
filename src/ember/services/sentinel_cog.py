@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 import rasterio
 from rio_tiler.io import Reader
+from scipy.ndimage import zoom
 
 from ember.logging import get_logger
 
@@ -88,7 +89,7 @@ def _sentinel_env() -> rasterio.Env:
     )
 
 
-def _encode_raster_geotiff(
+def encode_raster_geotiff(
     data: np.ndarray,
     bbox: tuple[float, float, float, float],
     dtype: str = "float32",
@@ -265,14 +266,15 @@ class SentinelCOGService:
             for layer in layers:
                 # Resize layer to canvas dimensions if needed
                 if layer.shape != (max_h, max_w):
-                    from scipy.ndimage import zoom
-
                     layer = zoom(
                         layer,
                         (max_h / layer.shape[0], max_w / layer.shape[1]),
                         order=1,
                     )
-                # Fill in where canvas is still zero (nodata)
+                # Fill where canvas has no data. We use == 0 as the nodata
+                # sentinel — Sentinel-2 L2A reflectance is 0-10000 scaled,
+                # so true zero is only returned by rio-tiler for out-of-bounds
+                # pixels (areas outside the scene's MGRS tile).
                 mask = canvas == 0
                 canvas[mask] = layer[mask]
 
@@ -294,7 +296,7 @@ class SentinelCOGService:
         If `scenes` is provided, reads from multiple scenes and stitches
         them into a mosaic for full bbox coverage.
         """
-        cache_key = _band_cache_key(scene_id, ["B04", "B03", "B02"], bbox, max_size)
+        cache_key = f"{format}:{_band_cache_key(scene_id, ['B04', 'B03', 'B02'], bbox, max_size)}"
         cached = _get_cached_band_read(cache_key)
         if cached:
             logger.debug(f"Band cache hit: {cache_key}")
@@ -315,7 +317,7 @@ class SentinelCOGService:
         if format == "png":
             raster = _encode_raster_png(rgb_scaled)
         else:
-            raster = _encode_raster_geotiff(rgb_scaled, bbox, dtype="uint8")
+            raster = encode_raster_geotiff(rgb_scaled, bbox, dtype="uint8")
 
         result = {
             "status": "success",
@@ -371,8 +373,6 @@ class SentinelCOGService:
         # Bands may have different native resolutions (e.g. B08=10m, B11=20m),
         # producing different array shapes. Resample the smaller to match the larger.
         if a.shape != b.shape:
-            from scipy.ndimage import zoom
-
             target_h = max(a.shape[0], b.shape[0])
             target_w = max(a.shape[1], b.shape[1])
             if a.shape[0] < target_h or a.shape[1] < target_w:
@@ -408,7 +408,7 @@ class SentinelCOGService:
         }
 
         if format == "raster":
-            result["raster"] = _encode_raster_geotiff(index_values, bbox)
+            result["raster"] = encode_raster_geotiff(index_values, bbox)
 
         _cache_band_read(f"idx:{index_name}:{cache_key}", result)
         return result

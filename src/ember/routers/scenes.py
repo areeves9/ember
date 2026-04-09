@@ -54,7 +54,7 @@ async def search_scenes(
     """
     _validate_bbox(min_lat, max_lat, min_lon, max_lon)
 
-    if start_date > end_date:
+    if start_date > end_date:  # Lexicographic comparison works for YYYY-MM-DD
         raise HTTPException(
             status_code=400, detail="start_date must be before or equal to end_date"
         )
@@ -140,10 +140,10 @@ async def get_scene_bands(
             )
             import numpy as np
 
-            from ember.services.sentinel_cog import _encode_raster_geotiff
+            from ember.services.sentinel_cog import encode_raster_geotiff
 
             stacked = np.stack([band_data[b] for b in band_list], axis=0)
-            raster = _encode_raster_geotiff(stacked, bbox)
+            raster = encode_raster_geotiff(stacked, bbox)
             result = {
                 "status": "success",
                 "scene_id": scene.id,

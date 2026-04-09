@@ -108,7 +108,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     except Exception:
         logger.warning("Satellite tracking: unavailable (skyfield not installed)")
 
-    logger.info(f"STAC scene search ready (Earth Search: {settings.earth_search_url})")
+    logger.info("STAC scene search ready (Earth Search)")
 
     logger.info(f"Ember ready! Listening on {settings.host}:{settings.port}")
 

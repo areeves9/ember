@@ -5,6 +5,7 @@ date range, and cloud cover. Returns scene metadata with S3 COG hrefs.
 """
 
 import asyncio
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from time import time
@@ -21,6 +22,7 @@ COLLECTION = "sentinel-2-l2a"
 
 # Mapping from canonical Sentinel-2 band names to Earth Search STAC asset keys.
 # Earth Search uses common names (red, nir, etc.) not band IDs (B04, B08).
+# B10 (Cirrus) is intentionally omitted — not available in L2A products.
 BAND_TO_STAC_KEY: dict[str, str] = {
     "B01": "coastal",
     "B02": "blue",
@@ -173,12 +175,15 @@ class STACService:
     def __init__(self) -> None:
         self._executor = ThreadPoolExecutor(max_workers=4)
         self._client: STACClient | None = None
+        self._client_lock = threading.Lock()
 
     def _get_client(self) -> STACClient:
-        """Lazy-initialize the STAC client."""
+        """Lazy-initialize the STAC client (thread-safe)."""
         if self._client is None:
-            self._client = STACClient.open(settings.earth_search_url)
-            logger.info(f"STAC client connected to {settings.earth_search_url}")
+            with self._client_lock:
+                if self._client is None:
+                    self._client = STACClient.open(settings.earth_search_url)
+                    logger.info("STAC client connected")
         return self._client
 
     def _search_sync(self, query: SceneQuery) -> list[Scene]:
@@ -241,8 +246,10 @@ class STACService:
     async def search_coverage(self, query: SceneQuery) -> list[Scene]:
         """Search for scenes and return the best one per MGRS tile.
 
-        Fetches up to 20 scenes (enough to cover multi-tile bboxes with
-        date variety), then picks the clearest per tile.
+        Fetches up to 20 scenes — enough for bboxes spanning up to ~4 MGRS
+        tiles with ~5 date options per tile. A 10° bbox (max allowed) spans
+        at most 4-6 tiles, so 20 provides adequate coverage. For the typical
+        tactical viewport (~0.5°), this is 1-2 tiles.
         """
         coverage_query = SceneQuery(
             bbox=query.bbox,
