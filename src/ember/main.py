@@ -24,6 +24,7 @@ from ember.routers import (
     imagery_router,
     nws_router,
     satellite_router,
+    scenes_router,
     terrain_router,
     vegetation_router,
     weather_router,
@@ -107,6 +108,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     except Exception:
         logger.warning("Satellite tracking: unavailable (skyfield not installed)")
 
+    logger.info(f"STAC scene search ready (Earth Search: {settings.earth_search_url})")
+
     logger.info(f"Ember ready! Listening on {settings.host}:{settings.port}")
 
     # Yield to run the application
@@ -150,6 +153,7 @@ def create_app() -> FastAPI:
     app.include_router(vegetation_router, prefix="/api/v1")
     app.include_router(terrain_router, prefix="/api/v1")
     app.include_router(satellite_router, prefix="/api/v1")
+    app.include_router(scenes_router, prefix="/api/v1")
 
     # Health check endpoint
     @app.get("/health")
@@ -175,6 +179,7 @@ def create_app() -> FastAPI:
                 "vegetation": "/api/v1/vegetation",
                 "terrain": "/api/v1/terrain",
                 "satellite": "/api/v1/satellite",
+                "scenes": "/api/v1/scenes",
             },
         }
 

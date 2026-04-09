@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     aws_secret_access_key: str = Field(default="", description="AWS secret key for S3 COG access")
     aws_region: str = Field(default="us-west-2", description="AWS region for S3")
 
+    # STAC (Sentinel-2 scene discovery)
+    earth_search_url: str = Field(
+        default="https://earth-search.aws.element84.com/v1",
+        description="STAC API URL for Sentinel-2 scene discovery",
+    )
+
     # EPA AirNow
     airnow_api_key: str = Field(default="", description="EPA AirNow API key for air quality data")
 
