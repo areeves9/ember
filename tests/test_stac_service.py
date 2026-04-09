@@ -6,15 +6,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ember.services.stac import (
-    STACService,
-    Scene,
     SceneQuery,
+    STACService,
     _item_to_scene,
+    _scene_cache,
     _search_cache,
     _search_cache_key,
-    _scene_cache,
 )
-
 
 # =============================================================================
 # Fixtures
@@ -49,13 +47,14 @@ def mock_stac_item():
         "datetime": "2026-03-15T18:32:15Z",
         "eo:cloud_cover": 8.2,
     }
+    # Earth Search uses common names, not band IDs
     item.assets = {
-        "B02": MagicMock(href="s3://sentinel-cogs/path/B02.tif"),
-        "B03": MagicMock(href="s3://sentinel-cogs/path/B03.tif"),
-        "B04": MagicMock(href="s3://sentinel-cogs/path/B04.tif"),
-        "B08": MagicMock(href="s3://sentinel-cogs/path/B08.tif"),
-        "B11": MagicMock(href="s3://sentinel-cogs/path/B11.tif"),
-        "B12": MagicMock(href="s3://sentinel-cogs/path/B12.tif"),
+        "blue": MagicMock(href="s3://sentinel-cogs/path/B02.tif"),
+        "green": MagicMock(href="s3://sentinel-cogs/path/B03.tif"),
+        "red": MagicMock(href="s3://sentinel-cogs/path/B04.tif"),
+        "nir": MagicMock(href="s3://sentinel-cogs/path/B08.tif"),
+        "swir16": MagicMock(href="s3://sentinel-cogs/path/B11.tif"),
+        "swir22": MagicMock(href="s3://sentinel-cogs/path/B12.tif"),
     }
     return item
 
@@ -107,26 +106,40 @@ class TestSearchCacheKey:
         assert key1 == key2
 
     def test_rounded_bbox_matches(self):
-        q1 = SceneQuery(bbox=(-118.500, 34.000, -118.000, 34.500),
-                        start_date="2026-03-01", end_date="2026-03-31")
-        q2 = SceneQuery(bbox=(-118.5001, 34.0004, -118.0002, 34.4999),
-                        start_date="2026-03-01", end_date="2026-03-31")
+        q1 = SceneQuery(
+            bbox=(-118.500, 34.000, -118.000, 34.500),
+            start_date="2026-03-01",
+            end_date="2026-03-31",
+        )
+        q2 = SceneQuery(
+            bbox=(-118.5001, 34.0004, -118.0002, 34.4999),
+            start_date="2026-03-01",
+            end_date="2026-03-31",
+        )
         assert _search_cache_key(q1) == _search_cache_key(q2)
 
     def test_different_dates_produce_different_key(self):
-        q1 = SceneQuery(bbox=(-118.5, 34.0, -118.0, 34.5),
-                        start_date="2026-03-01", end_date="2026-03-31")
-        q2 = SceneQuery(bbox=(-118.5, 34.0, -118.0, 34.5),
-                        start_date="2026-04-01", end_date="2026-04-30")
+        q1 = SceneQuery(
+            bbox=(-118.5, 34.0, -118.0, 34.5), start_date="2026-03-01", end_date="2026-03-31"
+        )
+        q2 = SceneQuery(
+            bbox=(-118.5, 34.0, -118.0, 34.5), start_date="2026-04-01", end_date="2026-04-30"
+        )
         assert _search_cache_key(q1) != _search_cache_key(q2)
 
     def test_different_cloud_cover_produces_different_key(self):
-        q1 = SceneQuery(bbox=(-118.5, 34.0, -118.0, 34.5),
-                        start_date="2026-03-01", end_date="2026-03-31",
-                        max_cloud_cover=10.0)
-        q2 = SceneQuery(bbox=(-118.5, 34.0, -118.0, 34.5),
-                        start_date="2026-03-01", end_date="2026-03-31",
-                        max_cloud_cover=50.0)
+        q1 = SceneQuery(
+            bbox=(-118.5, 34.0, -118.0, 34.5),
+            start_date="2026-03-01",
+            end_date="2026-03-31",
+            max_cloud_cover=10.0,
+        )
+        q2 = SceneQuery(
+            bbox=(-118.5, 34.0, -118.0, 34.5),
+            start_date="2026-03-01",
+            end_date="2026-03-31",
+            max_cloud_cover=50.0,
+        )
         assert _search_cache_key(q1) != _search_cache_key(q2)
 
 

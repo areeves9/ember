@@ -19,20 +19,23 @@ logger = get_logger(__name__)
 
 COLLECTION = "sentinel-2-l2a"
 
-# Bands we extract from STAC item assets
-SENTINEL2_BANDS = [
-    "B02",
-    "B03",
-    "B04",
-    "B05",
-    "B06",
-    "B07",
-    "B08",
-    "B8A",
-    "B11",
-    "B12",
-    "SCL",
-]
+# Mapping from canonical Sentinel-2 band names to Earth Search STAC asset keys.
+# Earth Search uses common names (red, nir, etc.) not band IDs (B04, B08).
+BAND_TO_STAC_KEY: dict[str, str] = {
+    "B01": "coastal",
+    "B02": "blue",
+    "B03": "green",
+    "B04": "red",
+    "B05": "rededge1",
+    "B06": "rededge2",
+    "B07": "rededge3",
+    "B08": "nir",
+    "B8A": "nir08",
+    "B09": "nir09",
+    "B11": "swir16",
+    "B12": "swir22",
+    "SCL": "scl",
+}
 
 # Scene search cache: 1 hour TTL
 _search_cache: dict[str, dict[str, Any]] = {}
@@ -116,10 +119,15 @@ def _cache_scene(scene: Scene) -> None:
 
 
 def _item_to_scene(item: Any) -> Scene:
-    """Convert a pystac Item to a Scene dataclass."""
+    """Convert a pystac Item to a Scene dataclass.
+
+    Maps Earth Search common-name asset keys (red, nir, swir16, ...)
+    back to canonical Sentinel-2 band names (B04, B08, B11, ...) so
+    the rest of the codebase can use band IDs consistently.
+    """
     assets: dict[str, str] = {}
-    for band in SENTINEL2_BANDS:
-        asset = item.assets.get(band.lower()) or item.assets.get(band)
+    for band, stac_key in BAND_TO_STAC_KEY.items():
+        asset = item.assets.get(stac_key)
         if asset:
             assets[band] = asset.href
 
