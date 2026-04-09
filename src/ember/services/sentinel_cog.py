@@ -200,6 +200,86 @@ class SentinelCOGService:
         results = await asyncio.gather(*tasks)
         return dict(zip(bands, results))
 
+    async def read_bands_mosaic(
+        self,
+        scenes: list,
+        bands: list[str],
+        bbox: tuple[float, float, float, float],
+        max_size: int = 512,
+    ) -> dict[str, np.ndarray]:
+        """Read bands from multiple scenes and stitch into a single mosaic.
+
+        Each scene covers a different MGRS tile. For each band, we read from
+        every scene in parallel, then composite onto a single canvas. Pixels
+        from later scenes only fill in where the canvas is still zero (nodata).
+        """
+        if len(scenes) == 1:
+            return await self.read_bands(scenes[0].assets, bands, bbox, max_size)
+
+        # Read all bands from all scenes in parallel
+        loop = asyncio.get_running_loop()
+        read_tasks = []
+        task_keys: list[tuple[int, str]] = []  # (scene_idx, band_name)
+
+        for scene_idx, scene in enumerate(scenes):
+            missing = [b for b in bands if b not in scene.assets]
+            if missing:
+                logger.warning(f"Scene {scene.id} missing bands {missing}, skipping")
+                continue
+            for band in bands:
+                read_tasks.append(
+                    loop.run_in_executor(
+                        self._executor,
+                        self._read_band_sync,
+                        scene.assets[band],
+                        bbox,
+                        max_size,
+                    )
+                )
+                task_keys.append((scene_idx, band))
+
+        read_results = await asyncio.gather(*read_tasks, return_exceptions=True)
+
+        # Group results by band, then composite
+        band_layers: dict[str, list[np.ndarray]] = {b: [] for b in bands}
+        for (scene_idx, band_name), result in zip(task_keys, read_results):
+            if isinstance(result, Exception):
+                logger.warning(
+                    f"Failed to read {band_name} from scene {scenes[scene_idx].id}: {result}"
+                )
+                continue
+            band_layers[band_name].append(result)
+
+        # Stitch each band: start with zeros, layer scenes on top
+        mosaic: dict[str, np.ndarray] = {}
+        for band_name in bands:
+            layers = band_layers[band_name]
+            if not layers:
+                raise ValueError(f"No data for band {band_name} from any scene")
+
+            # Use the largest array dimensions as the canvas size
+            max_h = max(layer.shape[0] for layer in layers)
+            max_w = max(layer.shape[1] for layer in layers)
+
+            canvas = np.zeros((max_h, max_w), dtype=np.float32)
+            for layer in layers:
+                # Resize layer to canvas dimensions if needed
+                if layer.shape != (max_h, max_w):
+                    from scipy.ndimage import zoom
+
+                    layer = zoom(
+                        layer,
+                        (max_h / layer.shape[0], max_w / layer.shape[1]),
+                        order=1,
+                    )
+                # Fill in where canvas is still zero (nodata)
+                mask = canvas == 0
+                canvas[mask] = layer[mask]
+
+            mosaic[band_name] = canvas
+
+        return mosaic
+
     async def get_truecolor(
         self,
         scene_id: str,
@@ -207,15 +287,23 @@ class SentinelCOGService:
         bbox: tuple[float, float, float, float],
         max_size: int = 512,
         format: str = "png",
+        scenes: list | None = None,
     ) -> dict[str, Any]:
-        """Read RGB bands and compose true-color image with 2.5x gain."""
+        """Read RGB bands and compose true-color image with 2.5x gain.
+
+        If `scenes` is provided, reads from multiple scenes and stitches
+        them into a mosaic for full bbox coverage.
+        """
         cache_key = _band_cache_key(scene_id, ["B04", "B03", "B02"], bbox, max_size)
         cached = _get_cached_band_read(cache_key)
         if cached:
             logger.debug(f"Band cache hit: {cache_key}")
             return cached
 
-        band_data = await self.read_bands(assets, ["B04", "B03", "B02"], bbox, max_size)
+        if scenes and len(scenes) > 1:
+            band_data = await self.read_bands_mosaic(scenes, ["B04", "B03", "B02"], bbox, max_size)
+        else:
+            band_data = await self.read_bands(assets, ["B04", "B03", "B02"], bbox, max_size)
 
         # Stack RGB (B04=Red, B03=Green, B02=Blue) and apply 2.5x gain
         rgb = np.stack([band_data["B04"], band_data["B03"], band_data["B02"]], axis=0)
@@ -249,8 +337,13 @@ class SentinelCOGService:
         bbox: tuple[float, float, float, float],
         max_size: int = 512,
         format: str = "raster",
+        scenes: list | None = None,
     ) -> dict[str, Any]:
-        """Compute a spectral index from band math."""
+        """Compute a spectral index from band math.
+
+        If `scenes` is provided, reads from multiple scenes and stitches
+        them into a mosaic for full bbox coverage.
+        """
         index_name = index_name.lower()
         if index_name not in INDEX_FORMULAS:
             raise ValueError(
@@ -265,7 +358,12 @@ class SentinelCOGService:
             logger.debug(f"Index cache hit: {index_name} {cache_key}")
             return cached
 
-        band_data = await self.read_bands(assets, [band_a_name, band_b_name], bbox, max_size)
+        if scenes and len(scenes) > 1:
+            band_data = await self.read_bands_mosaic(
+                scenes, [band_a_name, band_b_name], bbox, max_size
+            )
+        else:
+            band_data = await self.read_bands(assets, [band_a_name, band_b_name], bbox, max_size)
 
         a = band_data[band_a_name]
         b = band_data[band_b_name]

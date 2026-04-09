@@ -6,12 +6,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ember.services.stac import (
+    Scene,
     SceneQuery,
     STACService,
     _item_to_scene,
     _scene_cache,
     _search_cache,
     _search_cache_key,
+    pick_best_per_tile,
 )
 
 # =============================================================================
@@ -92,6 +94,46 @@ class TestItemToScene:
         item.assets = {}  # No bands
         scene = _item_to_scene(item)
         assert scene.assets == {}
+
+    def test_extracts_mgrs_tile(self, mock_stac_item):
+        scene = _item_to_scene(mock_stac_item)
+        assert scene.mgrs_tile == "11SLT"
+
+
+# =============================================================================
+# pick_best_per_tile
+# =============================================================================
+
+
+class TestPickBestPerTile:
+    def _scene(self, scene_id: str, tile: str, cloud: float) -> Scene:
+        return Scene(
+            id=scene_id,
+            datetime="2026-03-15",
+            cloud_cover=cloud,
+            bbox=(0, 0, 1, 1),
+            mgrs_tile=tile,
+        )
+
+    def test_one_scene_per_tile(self):
+        scenes = [self._scene("A", "11SLT", 5.0), self._scene("B", "11SLU", 10.0)]
+        result = pick_best_per_tile(scenes)
+        assert len(result) == 2
+
+    def test_picks_clearest_per_tile(self):
+        scenes = [
+            self._scene("A1", "11SLT", 20.0),
+            self._scene("A2", "11SLT", 5.0),
+            self._scene("B1", "11SLU", 10.0),
+        ]
+        result = pick_best_per_tile(scenes)
+        assert len(result) == 2
+        ids = {s.id for s in result}
+        assert "A2" in ids  # 5% cloud, not A1 at 20%
+        assert "B1" in ids
+
+    def test_empty_list(self):
+        assert pick_best_per_tile([]) == []
 
 
 # =============================================================================

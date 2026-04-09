@@ -159,51 +159,21 @@ async def get_truecolor_cog(
     if format not in ("png", "raster"):
         raise HTTPException(status_code=400, detail="format must be 'png' or 'raster'")
 
-    if min_lat >= max_lat:
-        raise HTTPException(status_code=400, detail="min_lat must be less than max_lat")
-    if min_lon >= max_lon:
-        raise HTTPException(status_code=400, detail="min_lon must be less than max_lon")
-
-    # Default date range: last 30 days
-    now = datetime.now(timezone.utc)
-    if end_date is None:
-        end_date = now.strftime("%Y-%m-%d")
-    if start_date is None:
-        start_date = (now - timedelta(days=30)).strftime("%Y-%m-%d")
-
-    query = SceneQuery(
-        bbox=(min_lon, min_lat, max_lon, max_lat),
-        start_date=start_date,
-        end_date=end_date,
-        max_cloud_cover=max_cloud_cover,
-        limit=1,
+    scenes, start_date, end_date = await _find_coverage_scenes(
+        min_lat, max_lat, min_lon, max_lon, start_date, end_date, max_cloud_cover
     )
 
-    try:
-        scenes = await stac_service.search_scenes(query)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"STAC API error: {e}")
-
-    if not scenes:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"No Sentinel-2 scenes found for bbox "
-                f"[{min_lon},{min_lat},{max_lon},{max_lat}] "
-                f"between {start_date} and {end_date} "
-                f"with cloud cover < {max_cloud_cover}%"
-            ),
-        )
-
-    scene = scenes[0]
+    scene = scenes[0]  # Primary scene (for metadata)
+    bbox = (min_lon, min_lat, max_lon, max_lat)
 
     try:
         result = await sentinel_cog_service.get_truecolor(
             scene_id=scene.id,
             assets=scene.assets,
-            bbox=(min_lon, min_lat, max_lon, max_lat),
+            bbox=bbox,
             max_size=max_size,
             format=format,
+            scenes=scenes,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -212,6 +182,7 @@ async def get_truecolor_cog(
 
     result["datetime"] = scene.datetime
     result["cloud_cover"] = scene.cloud_cover
+    result["scenes_used"] = len(scenes)
     return result
 
 
@@ -220,7 +191,7 @@ async def get_truecolor_cog(
 # ---------------------------------------------------------------------------
 
 
-async def _find_best_scene(
+async def _find_coverage_scenes(
     min_lat: float,
     max_lat: float,
     min_lon: float,
@@ -228,10 +199,10 @@ async def _find_best_scene(
     start_date: str | None,
     end_date: str | None,
     max_cloud_cover: float,
-) -> tuple[Scene, str, str]:
-    """Search STAC for the clearest scene, applying default dates.
+) -> tuple[list[Scene], str, str]:
+    """Search STAC for scenes covering the full bbox (best per MGRS tile).
 
-    Returns (scene, start_date, end_date).
+    Returns (scenes, start_date, end_date).
     Raises HTTPException on validation failure or no results.
     """
     if min_lat >= max_lat:
@@ -250,11 +221,10 @@ async def _find_best_scene(
         start_date=start_date,
         end_date=end_date,
         max_cloud_cover=max_cloud_cover,
-        limit=1,
     )
 
     try:
-        scenes = await stac_service.search_scenes(query)
+        scenes = await stac_service.search_coverage(query)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"STAC API error: {e}")
 
@@ -269,7 +239,7 @@ async def _find_best_scene(
             ),
         )
 
-    return scenes[0], start_date, end_date
+    return scenes, start_date, end_date
 
 
 # ---------------------------------------------------------------------------
@@ -358,10 +328,11 @@ async def get_ndvi_cog(
     if format not in ("stats", "raster"):
         raise HTTPException(status_code=400, detail="format must be 'stats' or 'raster'")
 
-    scene, start_date, end_date = await _find_best_scene(
+    scenes, start_date, end_date = await _find_coverage_scenes(
         min_lat, max_lat, min_lon, max_lon, start_date, end_date, max_cloud_cover
     )
 
+    scene = scenes[0]
     bbox = (min_lon, min_lat, max_lon, max_lat)
 
     try:
@@ -372,6 +343,7 @@ async def get_ndvi_cog(
             bbox=bbox,
             max_size=max_size,
             format=format,
+            scenes=scenes,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -388,6 +360,7 @@ async def get_ndvi_cog(
     result["date_range"] = {"start": start_date, "end": end_date}
     result["datetime"] = scene.datetime
     result["cloud_cover"] = scene.cloud_cover
+    result["scenes_used"] = len(scenes)
     return result
 
 
@@ -433,10 +406,11 @@ async def get_ndmi_cog(
     if format not in ("stats", "raster"):
         raise HTTPException(status_code=400, detail="format must be 'stats' or 'raster'")
 
-    scene, start_date, end_date = await _find_best_scene(
+    scenes, start_date, end_date = await _find_coverage_scenes(
         min_lat, max_lat, min_lon, max_lon, start_date, end_date, max_cloud_cover
     )
 
+    scene = scenes[0]
     bbox = (min_lon, min_lat, max_lon, max_lat)
 
     try:
@@ -447,6 +421,7 @@ async def get_ndmi_cog(
             bbox=bbox,
             max_size=max_size,
             format=format,
+            scenes=scenes,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -463,4 +438,5 @@ async def get_ndmi_cog(
     result["date_range"] = {"start": start_date, "end": end_date}
     result["datetime"] = scene.datetime
     result["cloud_cover"] = scene.cloud_cover
+    result["scenes_used"] = len(scenes)
     return result

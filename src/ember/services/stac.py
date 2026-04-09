@@ -67,6 +67,7 @@ class Scene:
     datetime: str
     cloud_cover: float
     bbox: tuple[float, float, float, float]
+    mgrs_tile: str = ""  # e.g. "11SLT" — extracted from scene ID
     assets: dict[str, str] = field(default_factory=dict)  # band_name -> S3 href
 
 
@@ -135,13 +136,35 @@ def _item_to_scene(item: Any) -> Scene:
     dt = item.properties.get("datetime", "")
     bbox = tuple(item.bbox) if item.bbox else (0.0, 0.0, 0.0, 0.0)
 
+    # Extract MGRS tile from scene ID (e.g. "S2A_11SLT_20260315_0_L2A" → "11SLT")
+    mgrs_tile = ""
+    parts = item.id.split("_")
+    if len(parts) >= 2:
+        mgrs_tile = parts[1]
+
     return Scene(
         id=item.id,
         datetime=dt,
         cloud_cover=float(cloud_cover),
         bbox=bbox,
+        mgrs_tile=mgrs_tile,
         assets=assets,
     )
+
+
+def pick_best_per_tile(scenes: list[Scene]) -> list[Scene]:
+    """Select the clearest scene for each MGRS tile.
+
+    When a bbox spans multiple tiles, STAC returns multiple scenes per tile
+    (different dates). This picks the lowest cloud cover per tile so we get
+    full spatial coverage with the best quality.
+    """
+    best: dict[str, Scene] = {}
+    for scene in scenes:
+        key = scene.mgrs_tile or scene.id
+        if key not in best or scene.cloud_cover < best[key].cloud_cover:
+            best[key] = scene
+    return list(best.values())
 
 
 class STACService:
@@ -214,6 +237,22 @@ class STACService:
         except Exception as e:
             logger.error(f"STAC scene fetch failed for {scene_id}: {e}")
             return None
+
+    async def search_coverage(self, query: SceneQuery) -> list[Scene]:
+        """Search for scenes and return the best one per MGRS tile.
+
+        Fetches up to 20 scenes (enough to cover multi-tile bboxes with
+        date variety), then picks the clearest per tile.
+        """
+        coverage_query = SceneQuery(
+            bbox=query.bbox,
+            start_date=query.start_date,
+            end_date=query.end_date,
+            max_cloud_cover=query.max_cloud_cover,
+            limit=20,
+        )
+        scenes = await self.search_scenes(coverage_query)
+        return pick_best_per_tile(scenes)
 
     async def get_scene(self, scene_id: str) -> Scene | None:
         """Fetch a single scene by ID, checking cache first."""

@@ -12,7 +12,7 @@ from ember.services.sentinel_cog import (
     _band_cache,
     _band_cache_key,
 )
-
+from ember.services.stac import Scene
 
 # =============================================================================
 # Fixtures
@@ -99,8 +99,10 @@ class TestReadBands:
     async def test_reads_multiple_bands_in_parallel(self, cog_service, sample_assets, sample_bbox):
         band_array = np.ones((64, 64), dtype=np.float32) * 5000
 
-        with patch("ember.services.sentinel_cog.Reader") as MockReader, \
-             patch("ember.services.sentinel_cog._sentinel_env") as mock_env:
+        with (
+            patch("ember.services.sentinel_cog.Reader") as MockReader,
+            patch("ember.services.sentinel_cog._sentinel_env") as mock_env,
+        ):
             mock_env.return_value.__enter__ = MagicMock()
             mock_env.return_value.__exit__ = MagicMock(return_value=False)
             MockReader.return_value = _mock_reader(band_array)
@@ -137,8 +139,10 @@ class TestGetTruecolor:
     async def test_returns_success_with_raster(self, cog_service, sample_assets, sample_bbox):
         band_array = np.ones((64, 64), dtype=np.float32) * 3000
 
-        with patch("ember.services.sentinel_cog.Reader") as MockReader, \
-             patch("ember.services.sentinel_cog._sentinel_env") as mock_env:
+        with (
+            patch("ember.services.sentinel_cog.Reader") as MockReader,
+            patch("ember.services.sentinel_cog._sentinel_env") as mock_env,
+        ):
             mock_env.return_value.__enter__ = MagicMock()
             mock_env.return_value.__exit__ = MagicMock(return_value=False)
             MockReader.return_value = _mock_reader(band_array)
@@ -163,21 +167,29 @@ class TestGetTruecolor:
     async def test_caches_result(self, cog_service, sample_assets, sample_bbox):
         band_array = np.ones((64, 64), dtype=np.float32) * 3000
 
-        with patch("ember.services.sentinel_cog.Reader") as MockReader, \
-             patch("ember.services.sentinel_cog._sentinel_env") as mock_env:
+        with (
+            patch("ember.services.sentinel_cog.Reader") as MockReader,
+            patch("ember.services.sentinel_cog._sentinel_env") as mock_env,
+        ):
             mock_env.return_value.__enter__ = MagicMock()
             mock_env.return_value.__exit__ = MagicMock(return_value=False)
             MockReader.return_value = _mock_reader(band_array)
 
             # First call
             await cog_service.get_truecolor(
-                scene_id="S2A_TEST", assets=sample_assets,
-                bbox=sample_bbox, max_size=64, format="raster",
+                scene_id="S2A_TEST",
+                assets=sample_assets,
+                bbox=sample_bbox,
+                max_size=64,
+                format="raster",
             )
             # Second call should use cache
             result = await cog_service.get_truecolor(
-                scene_id="S2A_TEST", assets=sample_assets,
-                bbox=sample_bbox, max_size=64, format="raster",
+                scene_id="S2A_TEST",
+                assets=sample_assets,
+                bbox=sample_bbox,
+                max_size=64,
+                format="raster",
             )
 
         assert result["status"] == "success"
@@ -277,3 +289,140 @@ class TestComputeIndex:
             assert band_a.startswith("B"), f"{name}: band_a should start with B"
             assert band_b.startswith("B"), f"{name}: band_b should start with B"
             assert band_a != band_b, f"{name}: bands should differ"
+
+
+# =============================================================================
+# read_bands_mosaic (multi-scene stitching)
+# =============================================================================
+
+
+def _make_scene(scene_id: str, mgrs_tile: str, assets: dict[str, str]) -> Scene:
+    return Scene(
+        id=scene_id,
+        datetime="2026-03-15T18:00:00Z",
+        cloud_cover=5.0,
+        bbox=(-118.5, 34.0, -118.0, 34.5),
+        mgrs_tile=mgrs_tile,
+        assets=assets,
+    )
+
+
+class TestReadBandsMosaic:
+    @pytest.mark.asyncio
+    async def test_single_scene_delegates_to_read_bands(self, cog_service, sample_bbox):
+        """With one scene, mosaic should just call read_bands."""
+        scene = _make_scene(
+            "S2A_11SLT",
+            "11SLT",
+            {
+                "B04": "s3://path/B04.tif",
+                "B03": "s3://path/B03.tif",
+            },
+        )
+        band_array = np.ones((64, 64), dtype=np.float32) * 5000
+
+        with patch.object(
+            cog_service,
+            "read_bands",
+            return_value={
+                "B04": band_array,
+                "B03": band_array,
+            },
+        ) as mock_rb:
+            result = await cog_service.read_bands_mosaic([scene], ["B04", "B03"], sample_bbox, 64)
+
+        mock_rb.assert_called_once()
+        assert set(result.keys()) == {"B04", "B03"}
+
+    @pytest.mark.asyncio
+    async def test_two_scenes_stitched(self, cog_service, sample_bbox):
+        """Two scenes with complementary data should fill the full canvas."""
+        scene_a = _make_scene("S2A_11SLT", "11SLT", {"B04": "s3://a/B04.tif"})
+        scene_b = _make_scene("S2B_11SLU", "11SLU", {"B04": "s3://b/B04.tif"})
+
+        # Scene A covers top half, scene B covers bottom half
+        top_half = np.zeros((64, 64), dtype=np.float32)
+        top_half[:32, :] = 5000.0
+
+        bottom_half = np.zeros((64, 64), dtype=np.float32)
+        bottom_half[32:, :] = 3000.0
+
+        call_count = 0
+
+        def mock_read_sync(href, bbox, max_size):
+            nonlocal call_count
+            call_count += 1
+            if "a/" in href:
+                return top_half
+            return bottom_half
+
+        with patch.object(cog_service, "_read_band_sync", side_effect=mock_read_sync):
+            result = await cog_service.read_bands_mosaic(
+                [scene_a, scene_b], ["B04"], sample_bbox, 64
+            )
+
+        canvas = result["B04"]
+        assert canvas.shape == (64, 64)
+        # Top half should have scene A data
+        assert canvas[0, 0] == 5000.0
+        # Bottom half should have scene B data
+        assert canvas[63, 0] == 3000.0
+        # No zeros left
+        assert np.all(canvas > 0)
+
+    @pytest.mark.asyncio
+    async def test_skips_scene_with_missing_bands(self, cog_service, sample_bbox):
+        """Scene missing a requested band should be skipped, not error."""
+        scene_ok = _make_scene("S2A_OK", "11SLT", {"B04": "s3://ok/B04.tif"})
+        scene_bad = _make_scene("S2B_BAD", "11SLU", {})  # No bands
+
+        data = np.ones((64, 64), dtype=np.float32) * 5000
+
+        with patch.object(cog_service, "_read_band_sync", return_value=data):
+            result = await cog_service.read_bands_mosaic(
+                [scene_ok, scene_bad], ["B04"], sample_bbox, 64
+            )
+
+        assert result["B04"].shape == (64, 64)
+
+    @pytest.mark.asyncio
+    async def test_truecolor_with_mosaic(self, cog_service, sample_bbox):
+        """get_truecolor with multiple scenes should use mosaic path."""
+        scenes = [
+            _make_scene(
+                "S2A_11SLT",
+                "11SLT",
+                {
+                    "B04": "s3://a/B04.tif",
+                    "B03": "s3://a/B03.tif",
+                    "B02": "s3://a/B02.tif",
+                },
+            ),
+            _make_scene(
+                "S2B_11SLU",
+                "11SLU",
+                {
+                    "B04": "s3://b/B04.tif",
+                    "B03": "s3://b/B03.tif",
+                    "B02": "s3://b/B02.tif",
+                },
+            ),
+        ]
+        band_data = {
+            "B04": np.ones((64, 64), dtype=np.float32) * 3000,
+            "B03": np.ones((64, 64), dtype=np.float32) * 3000,
+            "B02": np.ones((64, 64), dtype=np.float32) * 3000,
+        }
+
+        with patch.object(cog_service, "read_bands_mosaic", return_value=band_data) as mock_mosaic:
+            result = await cog_service.get_truecolor(
+                scene_id="S2A_11SLT",
+                assets=scenes[0].assets,
+                bbox=sample_bbox,
+                max_size=64,
+                format="raster",
+                scenes=scenes,
+            )
+
+        mock_mosaic.assert_called_once()
+        assert result["status"] == "success"
