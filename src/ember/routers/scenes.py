@@ -2,10 +2,11 @@
 
 from typing import Annotated
 
+import numpy as np
 from fastapi import APIRouter, HTTPException, Query
 
 from ember.auth import require_auth
-from ember.services.sentinel_cog import INDEX_FORMULAS, sentinel_cog_service
+from ember.services.sentinel_cog import INDEX_FORMULAS, encode_raster_geotiff, sentinel_cog_service
 from ember.services.stac import SceneQuery, stac_service
 
 router = APIRouter(prefix="/scenes", tags=["scenes"])
@@ -138,10 +139,6 @@ async def get_scene_bands(
                 bbox=bbox,
                 max_size=max_size,
             )
-            import numpy as np
-
-            from ember.services.sentinel_cog import encode_raster_geotiff
-
             stacked = np.stack([band_data[b] for b in band_list], axis=0)
             raster = encode_raster_geotiff(stacked, bbox)
             result = {

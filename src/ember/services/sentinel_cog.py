@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 import rasterio
+from PIL import Image
 from rio_tiler.io import Reader
 from scipy.ndimage import zoom
 
@@ -135,8 +136,6 @@ def encode_raster_geotiff(
 
 def _encode_raster_png(data_rgb: np.ndarray) -> dict[str, Any]:
     """Encode 3-band uint8 array as base64 PNG."""
-    from PIL import Image
-
     # data_rgb shape: (3, H, W) -> (H, W, 3) for PIL
     img_array = np.moveaxis(data_rgb, 0, -1)
     img = Image.fromarray(img_array, mode="RGB")
@@ -221,11 +220,13 @@ class SentinelCOGService:
         loop = asyncio.get_running_loop()
         read_tasks = []
         task_keys: list[tuple[int, str]] = []  # (scene_idx, band_name)
+        skipped_scenes: list[str] = []
 
         for scene_idx, scene in enumerate(scenes):
             missing = [b for b in bands if b not in scene.assets]
             if missing:
                 logger.warning(f"Scene {scene.id} missing bands {missing}, skipping")
+                skipped_scenes.append(scene.id)
                 continue
             for band in bands:
                 read_tasks.append(
@@ -296,7 +297,8 @@ class SentinelCOGService:
         If `scenes` is provided, reads from multiple scenes and stitches
         them into a mosaic for full bbox coverage.
         """
-        cache_key = f"{format}:{_band_cache_key(scene_id, ['B04', 'B03', 'B02'], bbox, max_size)}"
+        scenes_key = "+".join(s.id for s in scenes) if scenes and len(scenes) > 1 else scene_id
+        cache_key = f"{format}:{_band_cache_key(scenes_key, ['B04', 'B03', 'B02'], bbox, max_size)}"
         cached = _get_cached_band_read(cache_key)
         if cached:
             logger.debug(f"Band cache hit: {cache_key}")
@@ -354,8 +356,9 @@ class SentinelCOGService:
 
         band_a_name, band_b_name = INDEX_FORMULAS[index_name]
 
-        cache_key = _band_cache_key(scene_id, [band_a_name, band_b_name], bbox, max_size)
-        cached = _get_cached_band_read(f"idx:{index_name}:{cache_key}")
+        scenes_key = "+".join(s.id for s in scenes) if scenes and len(scenes) > 1 else scene_id
+        cache_key = _band_cache_key(scenes_key, [band_a_name, band_b_name], bbox, max_size)
+        cached = _get_cached_band_read(f"idx:{index_name}:{format}:{cache_key}")
         if cached:
             logger.debug(f"Index cache hit: {index_name} {cache_key}")
             return cached
@@ -410,7 +413,7 @@ class SentinelCOGService:
         if format == "raster":
             result["raster"] = encode_raster_geotiff(index_values, bbox)
 
-        _cache_band_read(f"idx:{index_name}:{cache_key}", result)
+        _cache_band_read(f"idx:{index_name}:{format}:{cache_key}", result)
         return result
 
 
