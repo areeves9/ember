@@ -221,6 +221,31 @@ class TestComputeIndex:
         assert result["bands_used"] == ["B08", "B04"]
 
     @pytest.mark.asyncio
+    async def test_handles_resolution_mismatch(self, cog_service, sample_assets, sample_bbox):
+        """NDMI mixes B08 (10m, larger array) and B11 (20m, smaller array)."""
+        nir_10m = np.ones((160, 298), dtype=np.float32) * 8000  # B08 at 10m
+        swir_20m = np.ones((80, 149), dtype=np.float32) * 2000  # B11 at 20m
+
+        def mock_read_sync(href, bbox, max_size):
+            if "B08" in href:
+                return nir_10m
+            return swir_20m
+
+        with patch.object(cog_service, "_read_band_sync", side_effect=mock_read_sync):
+            result = await cog_service.compute_index(
+                scene_id="S2A_TEST",
+                assets=sample_assets,
+                index_name="ndmi",
+                bbox=sample_bbox,
+                max_size=512,
+            )
+
+        assert result["status"] == "success"
+        assert result["index"] == "NDMI"
+        # (8000 - 2000) / (8000 + 2000) = 0.6
+        assert abs(result["stats"]["mean"] - 0.6) < 0.01
+
+    @pytest.mark.asyncio
     async def test_handles_zero_denominator(self, cog_service, sample_assets, sample_bbox):
         # Both bands zero -> denominator is 0, should return 0 (not NaN/inf)
         zeros = np.zeros((64, 64), dtype=np.float32)

@@ -270,6 +270,18 @@ class SentinelCOGService:
         a = band_data[band_a_name]
         b = band_data[band_b_name]
 
+        # Bands may have different native resolutions (e.g. B08=10m, B11=20m),
+        # producing different array shapes. Resample the smaller to match the larger.
+        if a.shape != b.shape:
+            from scipy.ndimage import zoom
+
+            target_h = max(a.shape[0], b.shape[0])
+            target_w = max(a.shape[1], b.shape[1])
+            if a.shape[0] < target_h or a.shape[1] < target_w:
+                a = zoom(a, (target_h / a.shape[0], target_w / a.shape[1]), order=1)
+            if b.shape[0] < target_h or b.shape[1] < target_w:
+                b = zoom(b, (target_h / b.shape[0], target_w / b.shape[1]), order=1)
+
         # Normalized difference: (A - B) / (A + B), avoiding division by zero
         denominator = a + b
         with np.errstate(invalid="ignore", divide="ignore"):
