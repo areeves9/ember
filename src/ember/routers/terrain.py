@@ -14,19 +14,32 @@ router = APIRouter(prefix="/terrain", tags=["terrain"])
 async def get_terrain(
     # Point mode parameters (existing)
     lat: Annotated[float | None, Query(ge=-90, le=90, description="Latitude (point mode)")] = None,
-    lon: Annotated[float | None, Query(ge=-180, le=180, description="Longitude (point mode)")] = None,
-    
+    lon: Annotated[
+        float | None, Query(ge=-180, le=180, description="Longitude (point mode)")
+    ] = None,
     # Bbox mode parameters (new)
-    min_lat: Annotated[float | None, Query(ge=-90, le=90, description="South boundary (bbox mode)")] = None,
-    max_lat: Annotated[float | None, Query(ge=-90, le=90, description="North boundary (bbox mode)")] = None,
-    min_lon: Annotated[float | None, Query(ge=-180, le=180, description="West boundary (bbox mode)")] = None,
-    max_lon: Annotated[float | None, Query(ge=-180, le=180, description="East boundary (bbox mode)")] = None,
-    
+    min_lat: Annotated[
+        float | None, Query(ge=-90, le=90, description="South boundary (bbox mode)")
+    ] = None,
+    max_lat: Annotated[
+        float | None, Query(ge=-90, le=90, description="North boundary (bbox mode)")
+    ] = None,
+    min_lon: Annotated[
+        float | None, Query(ge=-180, le=180, description="West boundary (bbox mode)")
+    ] = None,
+    max_lon: Annotated[
+        float | None, Query(ge=-180, le=180, description="East boundary (bbox mode)")
+    ] = None,
     # Common parameters
     layers: Annotated[
-        str | None, Query(description="Comma-separated layer names (default: all for point, required for bbox raster)")
+        str | None,
+        Query(
+            description="Comma-separated layer names (default: all for point, required for bbox raster)"
+        ),
     ] = None,
-    format: Annotated[str, Query(description="Response format: 'json' (default) or 'raster'")] = "json",
+    format: Annotated[
+        str, Query(description="Response format: 'json' (default) or 'raster'")
+    ] = "json",
     max_size: Annotated[
         int | None,
         Query(ge=64, le=2048, description="Max raster dimension in pixels (default 512)"),
@@ -40,7 +53,6 @@ async def get_terrain(
     Bbox mode: Provide min_lat, max_lat, min_lon, max_lon for raster data.
 
     Available layers:
-    - fuel: FBFM40 fuel model code
     - slope: Slope in degrees
     - aspect: Aspect in degrees + cardinal direction
     - elevation: Elevation in meters
@@ -48,11 +60,24 @@ async def get_terrain(
     - canopy_base_height: Canopy base height in meters
     - canopy_bulk_density: Canopy bulk density in kg/m³
     - canopy_cover: Canopy cover percent
+    - fuel: FBFM40 fuel model code
+    - fuel_model_13: Anderson 13 fuel model
+    - vegetation_type: Existing vegetation type (EVT)
+    - vegetation_cover: Existing vegetation cover percent
+    - vegetation_height: Existing vegetation height in meters
+    - biophysical_settings: Pre-settlement vegetation (BPS)
+    - fire_regime_group: Historical fire regime group (I-V)
+    - fire_return_interval: Mean fire return interval in years
+    - percent_fire_severity: Percent high-severity fire
+    - vegetation_departure: Departure from historical range (0-100%)
+    - vegetation_condition: Vegetation condition class (1-3)
+    - succession_classes: Current succession class (A-E)
+    - fuel_disturbance: Recent fuel disturbance type/severity
     """
     # Determine query mode
     has_point = lat is not None and lon is not None
     has_bbox = all(v is not None for v in [min_lat, max_lat, min_lon, max_lon])
-    
+
     # Check for partial bbox parameters
     has_partial_bbox = any(v is not None for v in [min_lat, max_lat, min_lon, max_lon])
 
@@ -60,10 +85,14 @@ async def get_terrain(
         if has_partial_bbox:
             # Helpful error for incomplete bbox
             missing_params = []
-            if min_lat is None: missing_params.append("min_lat")
-            if max_lat is None: missing_params.append("max_lat")
-            if min_lon is None: missing_params.append("min_lon")
-            if max_lon is None: missing_params.append("max_lon")
+            if min_lat is None:
+                missing_params.append("min_lat")
+            if max_lat is None:
+                missing_params.append("max_lat")
+            if min_lon is None:
+                missing_params.append("min_lon")
+            if max_lon is None:
+                missing_params.append("max_lon")
             raise HTTPException(
                 status_code=400,
                 detail=f"Incomplete bbox: missing parameters {', '.join(missing_params)}. All four bbox parameters required.",
@@ -94,23 +123,23 @@ async def get_terrain(
                 status_code=400,
                 detail="Raster format requires exactly one layer. Provide 'layers' parameter.",
             )
-        
+
         layer_list = [l.strip() for l in layers.split(",")]
         if len(layer_list) != 1:
             raise HTTPException(
                 status_code=400,
                 detail="Raster format supports exactly one layer at a time.",
             )
-        
+
         layer = layer_list[0]
-        
+
         # Validate layer name
         if layer not in service.available_layers:
             raise HTTPException(
                 status_code=400,
                 detail=f"Unknown layer: {layer}. Available: {service.available_layers}",
             )
-        
+
         try:
             raster_kwargs: dict = {
                 "min_lat": min_lat,
@@ -132,7 +161,7 @@ async def get_terrain(
     if has_bbox and format == "json":
         # For JSON format with bbox, return stats for each requested layer
         layer_list = [l.strip() for l in layers.split(",")] if layers else service.available_layers
-        
+
         # Validate layer names
         invalid = set(layer_list) - set(service.available_layers)
         if invalid:
@@ -140,7 +169,7 @@ async def get_terrain(
                 status_code=400,
                 detail=f"Unknown layers: {invalid}. Available: {service.available_layers}",
             )
-        
+
         # For now, return error - we could implement stats-only bbox query later
         raise HTTPException(
             status_code=400,

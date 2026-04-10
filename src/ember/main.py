@@ -69,14 +69,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             # Register known layers from S3
             # These are the files we've uploaded
             known_files = [
-                "LC24_F40_250.tif",  # Fuel
+                # Existing — Topographic (2020)
                 "LC20_SlpD_220.tif",  # Slope
                 "LC20_Asp_220.tif",  # Aspect
                 "LC20_Elev_220.tif",  # Elevation
+                # Existing — Canopy (2024)
                 "LC24_CH_250.tif",  # Canopy Height
                 "LC24_CBH_250.tif",  # Canopy Base Height
                 "LC24_CBD_250.tif",  # Canopy Bulk Density
                 "LC24_CC_250.tif",  # Canopy Cover
+                # Existing — Fuel (2024)
+                "LC24_F40_250.tif",  # Fuel (FBFM40)
+                # New — Fuel (2024)
+                "LF2024_FBFM13_CONUS.tif",  # Fuel Model 13
+                # New — Vegetation (2024/2020)
+                "LF2024_EVT_CONUS.tif",  # Existing Vegetation Type
+                "LF2024_EVC_CONUS.tif",  # Existing Vegetation Cover
+                "LF2024_EVH_CONUS.tif",  # Existing Vegetation Height
+                "LF2020_BPS_CONUS.tif",  # Biophysical Settings
+                # New — Fire Regime (2016/2024)
+                "LF2016_FRG_CONUS.tif",  # Fire Regime Groups
+                "LF2016_FRI_CONUS.tif",  # Fire Return Interval
+                "LF2016_PFS_CONUS.tif",  # Percent Fire Severity
+                "LF2024_VDep_CONUS.tif",  # Vegetation Departure
+                "LF2024_VCC_CONUS.tif",  # Vegetation Condition Class
+                "LF2024_SClass_CONUS.tif",  # Succession Classes
+                # New — Disturbance (2024)
+                "LF2024_FDist_CONUS.tif",  # Fuel Disturbance
             ]
             discovered = terrain_svc.discover_layers(known_files)
             logger.info(f"Terrain service ready: {len(discovered)} layers available")

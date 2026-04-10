@@ -16,6 +16,7 @@ import rasterio
 from rio_tiler.io import Reader
 
 from ember.config import settings
+from ember.data import BPS_CODES, EVT_CODES, FDIST_CODES
 from ember.logging import get_logger
 from ember.services.cog import COGService, get_cog_service
 
@@ -36,14 +37,45 @@ _RASTER_CACHE_MAX_MEMORY_MB = 500  # Approximate memory limit
 # Layer name -> file pattern mapping
 # Pattern matches: LC{YY}_{PATTERN}_{RES}.tif
 LAYER_PATTERNS = {
-    "fuel": "F40",  # FBFM40 fuel model (91-204 -> NB1, GR2, SH5, etc.)
+    # Existing — Topographic (2020)
     "slope": "SlpD",  # Slope in degrees (0-90)
     "aspect": "Asp",  # Aspect in degrees (0-360, -1 = flat)
     "elevation": "Elev",  # Elevation in meters
+    # Existing — Canopy (2024)
     "canopy_height": "CH",  # Canopy height in meters * 10
     "canopy_base_height": "CBH",  # Canopy base height in meters * 10
     "canopy_bulk_density": "CBD",  # Canopy bulk density kg/m³ * 100
     "canopy_cover": "CC",  # Canopy cover percent (0-100)
+    # Existing — Fuel (2024)
+    "fuel": "F40",  # FBFM40 fuel model (91-204 -> NB1, GR2, SH5, etc.)
+    # New — Fuel (2024)
+    "fuel_model_13": "FBFM13",  # Anderson 13 fuel model (1-13)
+    # New — Vegetation (2024/2020)
+    "vegetation_type": "EVT",  # Existing vegetation type (categorical)
+    "vegetation_cover": "EVC",  # Existing vegetation cover (percent)
+    "vegetation_height": "EVH",  # Existing vegetation height (meters * 10)
+    "biophysical_settings": "BPS",  # Pre-settlement vegetation (categorical)
+    # New — Fire Regime (2016/2024)
+    "fire_regime_group": "FRG",  # Fire regime group (1-5)
+    "fire_return_interval": "FRI",  # Mean fire return interval (years)
+    "percent_fire_severity": "PFS",  # Percent high-severity fire
+    "vegetation_departure": "VDep",  # Departure from historical (0-100%)
+    "vegetation_condition": "VCC",  # Condition class (1-3)
+    "succession_classes": "SClass",  # Succession class (A-E + special)
+    # New — Disturbance (2024)
+    "fuel_disturbance": "FDist",  # Recent fuel disturbance (categorical)
+}
+
+# Layers that use categorical pixel values (need nearest-neighbor resampling)
+CATEGORICAL_LAYERS = {
+    "fuel",
+    "fuel_model_13",
+    "vegetation_type",
+    "biophysical_settings",
+    "fire_regime_group",
+    "vegetation_condition",
+    "succession_classes",
+    "fuel_disturbance",
 }
 
 # FBFM40 pixel value -> fuel code mapping
@@ -95,6 +127,72 @@ FUEL_CODES = {
     204: "SB4",
 }
 
+# Anderson 13 fuel model pixel value -> code mapping
+ANDERSON_13_CODES = {
+    1: "1 - Short Grass",
+    2: "2 - Timber Grass/Understory",
+    3: "3 - Tall Grass",
+    4: "4 - Chaparral",
+    5: "5 - Brush",
+    6: "6 - Dormant Brush/Hardwood Slash",
+    7: "7 - Southern Rough",
+    8: "8 - Closed Timber Litter",
+    9: "9 - Hardwood Litter",
+    10: "10 - Timber Litter/Understory",
+    11: "11 - Light Logging Slash",
+    12: "12 - Medium Logging Slash",
+    13: "13 - Heavy Logging Slash",
+    91: "Urban/Developed",
+    92: "Snow/Ice",
+    93: "Agriculture",
+    98: "Water",
+    99: "Barren",
+}
+
+# Fire Regime Group pixel value -> label
+FIRE_REGIME_GROUPS = {
+    1: "I - Frequent low-severity (0-35 yr)",
+    2: "II - Frequent replacement (0-35 yr)",
+    3: "III - Mixed severity (35-200 yr)",
+    4: "IV - Replacement severity (35-200 yr)",
+    5: "V - Very rare replacement (200+ yr)",
+    111: "Water",
+    112: "Snow/Ice",
+    120: "Developed",
+    131: "Barren",
+    132: "Sparse",
+    180: "Agriculture",
+}
+
+# Vegetation Condition Class pixel value -> label
+VEGETATION_CONDITION_CLASSES = {
+    1: "Within historical range",
+    2: "Moderately departed",
+    3: "Significantly departed",
+    111: "Water",
+    112: "Snow/Ice",
+    120: "Developed",
+    131: "Barren",
+    132: "Sparse",
+    180: "Agriculture",
+}
+
+# Succession Class pixel value -> label
+SUCCESSION_CLASSES = {
+    1: "A - Early succession",
+    2: "B - Mid succession (open)",
+    3: "C - Mid succession (closed)",
+    4: "D - Late succession (open)",
+    5: "E - Late succession (closed)",
+    6: "UN - Uncharacteristic native",
+    7: "UE - Uncharacteristic exotic",
+    111: "Water",
+    112: "Snow/Ice",
+    120: "Developed",
+    132: "Barren/Sparse",
+    180: "Agriculture",
+}
+
 
 def _raster_cache_key(
     layer: str,
@@ -106,7 +204,7 @@ def _raster_cache_key(
 ) -> str:
     """
     Generate cache key for raster query.
-    
+
     Rounds coordinates to 3 decimals (~110m) to improve cache hits
     when viewport shifts slightly.
     """
@@ -119,11 +217,11 @@ def _get_cached_raster(key: str) -> dict | None:
     entry = _raster_cache.get(key)
     if not entry:
         return None
-    
+
     if time() - entry["timestamp"] > _RASTER_CACHE_TTL_SECONDS:
         del _raster_cache[key]
         return None
-    
+
     return entry["data"]
 
 
@@ -132,14 +230,11 @@ def _cache_raster(key: str, data: dict) -> None:
     # Simple size management: clear if too many entries
     if len(_raster_cache) >= _RASTER_CACHE_MAX_SIZE:
         # Remove oldest entries (simple LRU approximation)
-        sorted_entries = sorted(
-            _raster_cache.items(),
-            key=lambda x: x[1]["timestamp"]
-        )
+        sorted_entries = sorted(_raster_cache.items(), key=lambda x: x[1]["timestamp"])
         # Remove oldest 20%
-        for key_to_remove, _ in sorted_entries[:len(sorted_entries) // 5]:
+        for key_to_remove, _ in sorted_entries[: len(sorted_entries) // 5]:
             del _raster_cache[key_to_remove]
-    
+
     _raster_cache[key] = {
         "timestamp": time(),
         "data": data,
@@ -303,6 +398,61 @@ class TerrainService:
         if layer == "canopy_cover":
             return {"percent": value}
 
+        # New — Fuel
+        if layer == "fuel_model_13":
+            code = ANDERSON_13_CODES.get(value, f"Unknown({value})")
+            return {"code": code, "raw": value}
+
+        # New — Vegetation
+        if layer == "vegetation_type":
+            name = EVT_CODES.get(str(value), f"Unknown({value})")
+            return {"name": name, "raw": value}
+
+        if layer == "vegetation_cover":
+            return {"percent": value}
+
+        if layer == "vegetation_height":
+            # Stored as meters * 10 (same as canopy height)
+            return {"meters": value / 10.0 if value else None}
+
+        if layer == "biophysical_settings":
+            name = BPS_CODES.get(str(value), f"Unknown({value})")
+            return {"name": name, "raw": value}
+
+        # New — Fire Regime
+        if layer == "fire_regime_group":
+            label = FIRE_REGIME_GROUPS.get(value, f"Unknown({value})")
+            return {"group": label, "raw": value}
+
+        if layer == "fire_return_interval":
+            return {"years": value}
+
+        if layer == "percent_fire_severity":
+            return {"percent": value}
+
+        if layer == "vegetation_departure":
+            return {"percent": value}
+
+        if layer == "vegetation_condition":
+            label = VEGETATION_CONDITION_CLASSES.get(value, f"Unknown({value})")
+            return {"class": label, "raw": value}
+
+        if layer == "succession_classes":
+            label = SUCCESSION_CLASSES.get(value, f"Unknown({value})")
+            return {"class": label, "raw": value}
+
+        # New — Disturbance
+        if layer == "fuel_disturbance":
+            info = FDIST_CODES.get(str(value))
+            if info:
+                return {
+                    "type": info["type"],
+                    "severity": info["severity"],
+                    "time": info["time"],
+                    "raw": value,
+                }
+            return {"type": f"Unknown({value})", "raw": value}
+
         return value
 
     def _aspect_to_direction(self, degrees: int) -> str:
@@ -376,9 +526,7 @@ class TerrainService:
         min_lat_span_deg = 1.0 / 111.32  # ~1km in degrees latitude
         lat_center = (min_lat + max_lat) / 2
         km_per_deg_lon = 111.32 * abs(math.cos(math.radians(lat_center)))
-        min_lon_span_deg = (
-            1.0 / km_per_deg_lon if km_per_deg_lon > 1e-6 else min_lat_span_deg
-        )
+        min_lon_span_deg = 1.0 / km_per_deg_lon if km_per_deg_lon > 1e-6 else min_lat_span_deg
 
         if (max_lat - min_lat) < min_lat_span_deg:
             pad = (min_lat_span_deg - (max_lat - min_lat)) / 2
@@ -409,7 +557,7 @@ class TerrainService:
         if cached:
             logger.debug(f"Raster cache hit: {cache_key}")
             return cached
-        
+
         logger.debug(f"Raster cache miss: {cache_key}")
 
         try:
@@ -425,11 +573,11 @@ class TerrainService:
                 layer,
                 max_size,
             )
-            
+
             # Cache successful results
             if result.get("status") == "success":
                 _cache_raster(cache_key, result)
-            
+
             return result
         except Exception as e:
             logger.error(f"Bbox raster query failed for {layer}: {e}", exc_info=True)
@@ -461,10 +609,10 @@ class TerrainService:
             # Read the part of the raster that intersects our bbox
             # rio-tiler handles coordinate transformation automatically
             # bbox format: (left, bottom, right, top) = (min_lon, min_lat, max_lon, max_lat)
-            
-            # Use nearest neighbor for categorical data (fuel codes)
+
+            # Use nearest neighbor for categorical data (fuel codes, vegetation types, etc.)
             # Bilinear interpolation would create invalid intermediate values
-            resampling_method = "nearest" if layer == "fuel" else "bilinear"
+            resampling_method = "nearest" if layer in CATEGORICAL_LAYERS else "bilinear"
 
             img = src.part(
                 bbox=(min_lon, min_lat, max_lon, max_lat),
@@ -501,30 +649,30 @@ class TerrainService:
             # Write to in-memory GeoTIFF
             with rasterio.open(
                 buffer,
-                'w',
-                driver='GTiff',
+                "w",
+                driver="GTiff",
                 height=height,
                 width=width,
                 count=1,
                 dtype=data.dtype,
-                crs='EPSG:4326',
+                crs="EPSG:4326",
                 transform=transform,
-                compress='lzw',
+                compress="lzw",
             ) as dst:
                 dst.write(data[0], 1)  # Write first band
 
             # Encode as base64
             buffer.seek(0)
-            b64_data = base64.b64encode(buffer.read()).decode('utf-8')
+            b64_data = base64.b64encode(buffer.read()).decode("utf-8")
 
             # Get stats for the data
             # Initialize valid_data first
             valid_data = data.flatten()
 
             # Handle nodata/mask
-            if hasattr(info, 'nodata') and info.nodata is not None:
+            if hasattr(info, "nodata") and info.nodata is not None:
                 valid_data = valid_data[valid_data != info.nodata]
-            elif hasattr(data, 'mask') and data.mask is not False:
+            elif hasattr(data, "mask") and data.mask is not False:
                 valid_data = data.compressed()
 
             # Return no_data status if all values are invalid/masked
@@ -570,9 +718,7 @@ def get_terrain_service() -> TerrainService | None:
         return _terrain_service
 
     if not settings.landfire_s3_prefix:
-        logger.warning(
-            "LANDFIRE_S3_PREFIX not configured - terrain service unavailable"
-        )
+        logger.warning("LANDFIRE_S3_PREFIX not configured - terrain service unavailable")
         return None
 
     _terrain_service = TerrainService(settings.landfire_s3_prefix)
