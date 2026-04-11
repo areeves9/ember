@@ -6,7 +6,7 @@ set -e
 
 S3_BUCKET="s3://stellaris-landfire-data/Tif"
 AWS_PROFILE="stellaris"
-DOWNLOAD_DIR="/tmp/landfire"
+DOWNLOAD_DIR="/Volumes/Storage/landfire"
 BASE_URL="https://landfire.gov/data-downloads"
 
 # Layers to download (name, folder, filename)
@@ -22,6 +22,30 @@ declare -a LAYERS=(
     "Canopy Base Height,US_250,LF2024_CBH_250_CONUS.zip"
     "Canopy Bulk Density,US_250,LF2024_CBD_250_CONUS.zip"
     "Canopy Cover,US_250,LF2024_CC_250_CONUS.zip"
+
+    # Fuel (2024)
+    "Fuel Model FBFM13,CONUS_LF2024,LF2024_FBFM13_CONUS.zip"
+
+    # Vegetation (2024)
+    "Existing Veg Type,CONUS_LF2024,LF2024_EVT_CONUS.zip"
+    "Existing Veg Cover,CONUS_LF2024,LF2024_EVC_CONUS.zip"
+    "Existing Veg Height,CONUS_LF2024,LF2024_EVH_CONUS.zip"
+
+    # Vegetation (2020)
+    "Biophysical Settings,CONUS_LF2020,LF2020_BPS_CONUS.zip"
+
+    # Fire Regime (2016)
+    "Fire Regime Groups,CONUS_LF2016,LF2016_FRG_CONUS.zip"
+    "Fire Return Interval,CONUS_LF2016,LF2016_FRI_CONUS.zip"
+    "Percent Fire Severity,CONUS_LF2016,LF2016_PFS_CONUS.zip"
+
+    # Fire Regime (2024)
+    "Vegetation Departure,CONUS_LF2024,LF2024_VDep_CONUS.zip"
+    "Vegetation Condition Class,CONUS_LF2024,LF2024_VCC_CONUS.zip"
+    "Succession Classes,CONUS_LF2024,LF2024_SClass_CONUS.zip"
+
+    # Disturbance (2024)
+    "Fuel Disturbance,CONUS_LF2024,LF2024_FDist_CONUS.zip"
 )
 
 mkdir -p "$DOWNLOAD_DIR"
@@ -45,7 +69,7 @@ for layer_info in "${LAYERS[@]}"; do
     echo "URL: $zip_url"
 
     # Extract layer code from zip name for S3 check (e.g., LF2020_SlpD_220 -> SlpD)
-    layer_code=$(echo "$zip_name" | sed -E 's/LF[0-9]+_([A-Za-z]+)_.*/\1/')
+    layer_code=$(echo "$zip_name" | sed -E 's/LF[0-9]+_([A-Za-z0-9]+)_.*/\1/')
 
     # Check if already in S3
     existing=$(aws s3 ls "${S3_BUCKET}/" --profile "$AWS_PROFILE" 2>/dev/null | grep -i "_${layer_code}_" | head -1 || true)

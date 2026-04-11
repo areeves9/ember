@@ -1,0 +1,322 @@
+{
+  "0": {
+    "type": "No Disturbance",
+    "severity": "NA",
+    "time": "NA"
+  },
+  "111": {
+    "type": "Fire",
+    "severity": "Low",
+    "time": "One Year"
+  },
+  "112": {
+    "type": "Fire",
+    "severity": "Low",
+    "time": "Two to Five Years"
+  },
+  "113": {
+    "type": "Fire",
+    "severity": "Low",
+    "time": "Six to Ten Years"
+  },
+  "121": {
+    "type": "Fire",
+    "severity": "Moderate",
+    "time": "One Year"
+  },
+  "122": {
+    "type": "Fire",
+    "severity": "Moderate",
+    "time": "Two to Five Years"
+  },
+  "123": {
+    "type": "Fire",
+    "severity": "Moderate",
+    "time": "Six to Ten Years"
+  },
+  "131": {
+    "type": "Fire",
+    "severity": "High",
+    "time": "One Year"
+  },
+  "132": {
+    "type": "Fire",
+    "severity": "High",
+    "time": "Two to Five Years"
+  },
+  "133": {
+    "type": "Fire",
+    "severity": "High",
+    "time": "Six to Ten Years"
+  },
+  "211": {
+    "type": "Mechanical Add",
+    "severity": "Low",
+    "time": "One Year"
+  },
+  "212": {
+    "type": "Mechanical Add",
+    "severity": "Low",
+    "time": "Two to Five Years"
+  },
+  "213": {
+    "type": "Mechanical Add",
+    "severity": "Low",
+    "time": "Six to Ten Years"
+  },
+  "221": {
+    "type": "Mechanical Add",
+    "severity": "Moderate",
+    "time": "One Year"
+  },
+  "222": {
+    "type": "Mechanical Add",
+    "severity": "Moderate",
+    "time": "Two to Five Years"
+  },
+  "223": {
+    "type": "Mechanical Add",
+    "severity": "Moderate",
+    "time": "Six to Ten Years"
+  },
+  "231": {
+    "type": "Mechanical Add",
+    "severity": "High",
+    "time": "One Year"
+  },
+  "232": {
+    "type": "Mechanical Add",
+    "severity": "High",
+    "time": "Two to Five Years"
+  },
+  "233": {
+    "type": "Mechanical Add",
+    "severity": "High",
+    "time": "Six to Ten Years"
+  },
+  "311": {
+    "type": "Mechanical Remove",
+    "severity": "Low",
+    "time": "One Year"
+  },
+  "312": {
+    "type": "Mechanical Remove",
+    "severity": "Low",
+    "time": "Two to Five Years"
+  },
+  "313": {
+    "type": "Mechanical Remove",
+    "severity": "Low",
+    "time": "Six to Ten Years"
+  },
+  "321": {
+    "type": "Mechanical Remove",
+    "severity": "Moderate",
+    "time": "One Year"
+  },
+  "322": {
+    "type": "Mechanical Remove",
+    "severity": "Moderate",
+    "time": "Two to Five Years"
+  },
+  "323": {
+    "type": "Mechanical Remove",
+    "severity": "Moderate",
+    "time": "Six to Ten Years"
+  },
+  "331": {
+    "type": "Mechanical Remove",
+    "severity": "High",
+    "time": "One Year"
+  },
+  "332": {
+    "type": "Mechanical Remove",
+    "severity": "High",
+    "time": "Two to Five Years"
+  },
+  "333": {
+    "type": "Mechanical Remove",
+    "severity": "High",
+    "time": "Six to Ten Years"
+  },
+  "411": {
+    "type": "Windthrow",
+    "severity": "Low",
+    "time": "One Year"
+  },
+  "412": {
+    "type": "Windthrow",
+    "severity": "Low",
+    "time": "Two to Five Years"
+  },
+  "413": {
+    "type": "Windthrow",
+    "severity": "Low",
+    "time": "Six to Ten Years"
+  },
+  "421": {
+    "type": "Windthrow",
+    "severity": "Moderate",
+    "time": "One Year"
+  },
+  "422": {
+    "type": "Windthrow",
+    "severity": "Moderate",
+    "time": "Two to Five Years"
+  },
+  "423": {
+    "type": "Windthrow",
+    "severity": "Moderate",
+    "time": "Six to Ten Years"
+  },
+  "431": {
+    "type": "Windthrow",
+    "severity": "High",
+    "time": "One Year"
+  },
+  "432": {
+    "type": "Windthrow",
+    "severity": "High",
+    "time": "Two to Five Years"
+  },
+  "433": {
+    "type": "Windthrow",
+    "severity": "High",
+    "time": "Six to Ten Years"
+  },
+  "511": {
+    "type": "Insects-Disease",
+    "severity": "Low",
+    "time": "One Year"
+  },
+  "512": {
+    "type": "Insects-Disease",
+    "severity": "Low",
+    "time": "Two to Five Years"
+  },
+  "513": {
+    "type": "Insects-Disease",
+    "severity": "Low",
+    "time": "Six to Ten Years"
+  },
+  "521": {
+    "type": "Insects-Disease",
+    "severity": "Moderate",
+    "time": "One Year"
+  },
+  "522": {
+    "type": "Insects-Disease",
+    "severity": "Moderate",
+    "time": "Two to Five Years"
+  },
+  "523": {
+    "type": "Insects-Disease",
+    "severity": "Moderate",
+    "time": "Six to Ten Years"
+  },
+  "531": {
+    "type": "Insects-Disease",
+    "severity": "High",
+    "time": "One Year"
+  },
+  "532": {
+    "type": "Insects-Disease",
+    "severity": "High",
+    "time": "Two to Five Years"
+  },
+  "533": {
+    "type": "Insects-Disease",
+    "severity": "High",
+    "time": "Six to Ten Years"
+  },
+  "611": {
+    "type": "Mechanical Unknown",
+    "severity": "Low",
+    "time": "One Year"
+  },
+  "612": {
+    "type": "Mechanical Unknown",
+    "severity": "Low",
+    "time": "Two to Five Years"
+  },
+  "613": {
+    "type": "Mechanical Unknown",
+    "severity": "Low",
+    "time": "Six to Ten Years"
+  },
+  "621": {
+    "type": "Mechanical Unknown",
+    "severity": "Moderate",
+    "time": "One Year"
+  },
+  "622": {
+    "type": "Mechanical Unknown",
+    "severity": "Moderate",
+    "time": "Two to Five Years"
+  },
+  "623": {
+    "type": "Mechanical Unknown",
+    "severity": "Moderate",
+    "time": "Six to Ten Years"
+  },
+  "631": {
+    "type": "Mechanical Unknown",
+    "severity": "High",
+    "time": "One Year"
+  },
+  "632": {
+    "type": "Mechanical Unknown",
+    "severity": "High",
+    "time": "Two to Five Years"
+  },
+  "633": {
+    "type": "Mechanical Unknown",
+    "severity": "High",
+    "time": "Six to Ten Years"
+  },
+  "711": {
+    "type": "Mastication",
+    "severity": "Low",
+    "time": "One Year"
+  },
+  "712": {
+    "type": "Mastication",
+    "severity": "Low",
+    "time": "Two to Five Years"
+  },
+  "713": {
+    "type": "Mastication",
+    "severity": "Low",
+    "time": "Six to Ten Years"
+  },
+  "721": {
+    "type": "Mastication",
+    "severity": "Moderate",
+    "time": "One Year"
+  },
+  "722": {
+    "type": "Mastication",
+    "severity": "Moderate",
+    "time": "Two to Five Years"
+  },
+  "723": {
+    "type": "Mastication",
+    "severity": "Moderate",
+    "time": "Six to Ten Years"
+  },
+  "731": {
+    "type": "Mastication",
+    "severity": "High",
+    "time": "One Year"
+  },
+  "732": {
+    "type": "Mastication",
+    "severity": "High",
+    "time": "Two to Five Years"
+  },
+  "733": {
+    "type": "Mastication",
+    "severity": "High",
+    "time": "Six to Ten Years"
+  }
+}
