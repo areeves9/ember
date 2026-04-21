@@ -355,3 +355,124 @@ class TestTerrainFullExtent:
 
         assert r.status_code == 400
         assert "Incomplete bbox" in r.json()["detail"]
+
+
+# =============================================================================
+# ORQ-141: bbox-scoped raster responses carry Cache-Control: public, max-age=3600
+# =============================================================================
+
+BBOX_QS = "min_lat=34.0&max_lat=35.0&min_lon=-118.0&max_lon=-117.0"
+
+IMAGERY_BBOX_CASES = [
+    (
+        "ndvi-cog",
+        "ember.routers.imagery.stac_service.search_coverage",
+        "ember.routers.imagery.sentinel_cog_service.compute_index",
+        lambda scene: _index_result(scene, "NDVI", {"min": 0.1, "max": 0.7, "mean": 0.42}),
+    ),
+    (
+        "ndmi-cog",
+        "ember.routers.imagery.stac_service.search_coverage",
+        "ember.routers.imagery.sentinel_cog_service.compute_index",
+        lambda scene: _index_result(scene, "NDMI", {"min": -0.3, "max": 0.4, "mean": 0.05}),
+    ),
+    (
+        "truecolor-cog",
+        "ember.routers.imagery.stac_service.search_coverage",
+        "ember.routers.imagery.sentinel_cog_service.get_truecolor",
+        lambda scene: _truecolor_result(scene),
+    ),
+]
+
+
+class TestImageryBboxCacheHeader:
+    """ORQ-141 Phase 1: bbox-scoped imagery responses carry 1h Cache-Control."""
+
+    @pytest.mark.parametrize("endpoint,stac_target,svc_target,result_factory", IMAGERY_BBOX_CASES)
+    def test_bbox_response_has_1h_cache_control(
+        self, client, fake_scene, endpoint, stac_target, svc_target, result_factory
+    ):
+        canned = result_factory(fake_scene)
+        with (
+            patch(stac_target, new=AsyncMock(return_value=[fake_scene])),
+            patch(svc_target, new=AsyncMock(return_value=canned)),
+        ):
+            r = client.get(f"/api/v1/imagery/{endpoint}?{BBOX_QS}")
+
+        assert r.status_code == 200
+        assert r.headers.get("Cache-Control") == "public, max-age=3600"
+
+    @pytest.mark.parametrize("endpoint,stac_target,svc_target,result_factory", IMAGERY_BBOX_CASES)
+    def test_full_extent_still_has_6h_cache_control(
+        self, client, fake_scene, endpoint, stac_target, svc_target, result_factory
+    ):
+        """Regression: full-extent path must still return max-age=21600."""
+        canned = result_factory(fake_scene)
+        with (
+            patch(
+                "ember.routers.imagery.stac_service.search_scenes",
+                new=AsyncMock(return_value=[fake_scene]),
+            ),
+            patch(svc_target, new=AsyncMock(return_value=canned)),
+        ):
+            r = client.get(f"/api/v1/imagery/{endpoint}")
+
+        assert r.status_code == 200
+        assert r.headers.get("Cache-Control") == "public, max-age=21600"
+
+
+class TestTerrainBboxCacheHeader:
+    """ORQ-141 Phase 1: bbox-scoped terrain raster response carries 1h Cache-Control."""
+
+    @pytest.fixture
+    def fake_terrain_service_with_bbox(self):
+        """Terrain service mock with both full-extent and bbox-raster async methods."""
+        svc = MagicMock()
+        svc.available_layers = ["fuel", "elevation"]
+        svc.query_terrain_full_extent_raster = AsyncMock(
+            return_value={
+                "status": "success",
+                "layer": "fuel",
+                "bbox": [-125.0, 24.0, -66.0, 50.0],
+                "raster": {"format": "geotiff", "encoding": "base64", "data": "fake"},
+                "stats": {"min": 91.0, "max": 204.0, "mean": 165.0},
+            }
+        )
+        svc.query_terrain_bbox_raster = AsyncMock(
+            return_value={
+                "status": "success",
+                "layer": "fuel",
+                "bbox": [-118.0, 34.0, -117.0, 35.0],
+                "raster": {"format": "geotiff", "encoding": "base64", "data": "fake"},
+                "stats": {"min": 91.0, "max": 180.0, "mean": 140.0},
+            }
+        )
+        return svc
+
+    def test_bbox_raster_has_1h_cache_control(self, client, fake_terrain_service_with_bbox):
+        with patch(
+            "ember.routers.terrain.get_terrain_service",
+            return_value=fake_terrain_service_with_bbox,
+        ):
+            r = client.get(
+                "/api/v1/terrain?format=raster&layers=fuel"
+                "&min_lat=34.0&max_lat=35.0&min_lon=-118.0&max_lon=-117.0"
+            )
+
+        assert r.status_code == 200
+        fake_terrain_service_with_bbox.query_terrain_bbox_raster.assert_awaited_once()
+        assert r.headers.get("Cache-Control") == "public, max-age=3600"
+
+    def test_full_extent_terrain_still_has_24h_cache_control(
+        self, client, fake_terrain_service_with_bbox
+    ):
+        """Regression: full-extent terrain must still return max-age=86400."""
+        with patch(
+            "ember.routers.terrain.get_terrain_service",
+            return_value=fake_terrain_service_with_bbox,
+        ):
+            r = client.get("/api/v1/terrain?format=raster&layers=fuel")
+
+        assert r.status_code == 200
+        fake_terrain_service_with_bbox.query_terrain_full_extent_raster.assert_awaited_once()
+        assert r.headers.get("Cache-Control") == "public, max-age=86400"
