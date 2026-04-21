@@ -62,6 +62,19 @@ class Settings(BaseSettings):
         description="STAC API URL for Sentinel-2 scene discovery",
     )
 
+    # Full-extent raster overviews (ORQ-140)
+    overview_max_size: int = Field(
+        default=1200,
+        description="Max pixel dimension for full-extent raster previews",
+    )
+    sentinel_default_region: str = Field(
+        default="-125,24,-66,50",
+        description=(
+            "Default bbox for no-bbox Sentinel-2 scene search "
+            "(min_lon,min_lat,max_lon,max_lat). Default is CONUS."
+        ),
+    )
+
     # EPA AirNow
     airnow_api_key: str = Field(default="", description="EPA AirNow API key for air quality data")
 
@@ -97,6 +110,17 @@ class Settings(BaseSettings):
         if self.auth0_domain:
             return f"https://{self.auth0_domain}/.well-known/jwks.json"
         return None
+
+    @property
+    def sentinel_default_bbox(self) -> tuple[float, float, float, float]:
+        """Parse sentinel_default_region into (min_lon, min_lat, max_lon, max_lat)."""
+        parts = [float(p.strip()) for p in self.sentinel_default_region.split(",")]
+        if len(parts) != 4:
+            raise ValueError(
+                "sentinel_default_region must be 4 comma-separated floats, "
+                f"got: {self.sentinel_default_region}"
+            )
+        return (parts[0], parts[1], parts[2], parts[3])
 
 
 @lru_cache

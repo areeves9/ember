@@ -3,14 +3,93 @@
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 
 from ember.auth import require_auth
+from ember.config import settings
 from ember.services.copernicus import copernicus_service
 from ember.services.sentinel_cog import sentinel_cog_service
 from ember.services.stac import Scene, SceneQuery, stac_service
 
 router = APIRouter(prefix="/imagery", tags=["imagery"])
+
+# Browser cache TTL for full-extent Sentinel-2 previews (6 hours).
+# Sentinel-2 NRT scenes publish every 3-5 days per tile, so this buffers
+# a few requests within a user session without staling against real updates.
+FULL_EXTENT_CACHE_SECONDS = 21600
+
+
+def _validate_all_or_none_bbox(
+    min_lat: float | None,
+    max_lat: float | None,
+    min_lon: float | None,
+    max_lon: float | None,
+) -> tuple[float, float, float, float] | None:
+    """Enforce all-or-none bbox contract. Returns bbox tuple or None.
+
+    Raises HTTPException(400) if some but not all bbox params are provided.
+    """
+    bbox_params = [min_lat, max_lat, min_lon, max_lon]
+    provided = [p is not None for p in bbox_params]
+    if all(provided):
+        if min_lat >= max_lat:
+            raise HTTPException(status_code=400, detail="min_lat must be less than max_lat")
+        if min_lon >= max_lon:
+            raise HTTPException(status_code=400, detail="min_lon must be less than max_lon")
+        return (min_lon, min_lat, max_lon, max_lat)
+    if not any(provided):
+        return None
+    names = ["min_lat", "max_lat", "min_lon", "max_lon"]
+    missing = [n for n, p in zip(names, provided) if not p]
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Incomplete bbox: missing {', '.join(missing)}. "
+            "Provide all four (min_lat, max_lat, min_lon, max_lon) or none."
+        ),
+    )
+
+
+async def _find_single_best_scene(
+    bbox: tuple[float, float, float, float],
+    start_date: str | None,
+    end_date: str | None,
+    max_cloud_cover: float,
+) -> tuple[Scene, str, str]:
+    """Find the single most-recent cloud-free scene inside `bbox`.
+
+    Used for the no-bbox full-extent path: STAC still requires a search
+    region, so we seed with settings.sentinel_default_bbox (CONUS by default)
+    and pick the single clearest recent scene inside it. The scene's own
+    footprint becomes the effective output extent.
+    """
+    now = datetime.now(timezone.utc)
+    if end_date is None:
+        end_date = now.strftime("%Y-%m-%d")
+    if start_date is None:
+        start_date = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+
+    query = SceneQuery(
+        bbox=bbox,
+        start_date=start_date,
+        end_date=end_date,
+        max_cloud_cover=max_cloud_cover,
+        limit=5,
+    )
+    try:
+        scenes = await stac_service.search_scenes(query)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"STAC API error: {e}")
+    if not scenes:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No Sentinel-2 scenes found in default region "
+                f"{list(bbox)} between {start_date} and {end_date} "
+                f"with cloud cover < {max_cloud_cover}%"
+            ),
+        )
+    return scenes[0], start_date, end_date
 
 
 @router.get("/truecolor")
@@ -117,10 +196,19 @@ async def get_truecolor(
 
 @router.get("/truecolor-cog")
 async def get_truecolor_cog(
-    min_lat: Annotated[float, Query(ge=-90, le=90, description="South bound")],
-    max_lat: Annotated[float, Query(ge=-90, le=90, description="North bound")],
-    min_lon: Annotated[float, Query(ge=-180, le=180, description="West bound")],
-    max_lon: Annotated[float, Query(ge=-180, le=180, description="East bound")],
+    response: Response,
+    min_lat: Annotated[
+        float | None, Query(ge=-90, le=90, description="South bound (optional; all-or-none)")
+    ] = None,
+    max_lat: Annotated[
+        float | None, Query(ge=-90, le=90, description="North bound (optional; all-or-none)")
+    ] = None,
+    min_lon: Annotated[
+        float | None, Query(ge=-180, le=180, description="West bound (optional; all-or-none)")
+    ] = None,
+    max_lon: Annotated[
+        float | None, Query(ge=-180, le=180, description="East bound (optional; all-or-none)")
+    ] = None,
     start_date: Annotated[
         str | None,
         Query(
@@ -136,9 +224,16 @@ async def get_truecolor_cog(
         float, Query(ge=0, le=100, description="Max cloud cover percentage")
     ] = 20.0,
     max_size: Annotated[
-        int,
-        Query(ge=64, le=2048, description="Max pixel dimension"),
-    ] = 512,
+        int | None,
+        Query(
+            ge=64,
+            le=2048,
+            description=(
+                "Max pixel dimension (default 512 for bbox, "
+                "overview_max_size for full-extent)"
+            ),
+        ),
+    ] = None,
     format: Annotated[
         str, Query(description="Response format: 'png' (default) or 'raster' (GeoTIFF)")
     ] = "png",
@@ -149,29 +244,54 @@ async def get_truecolor_cog(
     Convenience endpoint that searches for the clearest recent Sentinel-2
     scene and returns an RGB composite (B04/B03/B02 with 2.5x gain).
 
-    Unlike /imagery/truecolor (Copernicus), this endpoint:
-    - Returns data from a single, identified scene (not an opaque mosaic)
-    - Includes scene_id, datetime, and cloud_cover in the response
-    - Has no auth dependency on Copernicus (reads public S3 bucket)
+    When bbox is omitted, returns the full native extent of the single
+    most-recent cloud-free primary scene (via pyramid overviews). When
+    bbox is provided, returns a bbox crop, stitching across MGRS tiles
+    if needed.
 
     Data source: AWS sentinel-cogs S3 bucket via Earth Search STAC API.
     """
     if format not in ("png", "raster"):
         raise HTTPException(status_code=400, detail="format must be 'png' or 'raster'")
 
-    scenes, start_date, end_date = await _find_coverage_scenes(
-        min_lat, max_lat, min_lon, max_lon, start_date, end_date, max_cloud_cover
-    )
+    bbox = _validate_all_or_none_bbox(min_lat, max_lat, min_lon, max_lon)
 
-    scene = scenes[0]  # Primary scene (for metadata)
-    bbox = (min_lon, min_lat, max_lon, max_lat)
+    if bbox is None:
+        scene, start_date, end_date = await _find_single_best_scene(
+            settings.sentinel_default_bbox, start_date, end_date, max_cloud_cover
+        )
+        effective_max_size = max_size if max_size is not None else settings.overview_max_size
+        try:
+            result = await sentinel_cog_service.get_truecolor(
+                scene_id=scene.id,
+                assets=scene.assets,
+                bbox=None,
+                max_size=effective_max_size,
+                format=format,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"COG read error: {e}")
+
+        result["datetime"] = scene.datetime
+        result["cloud_cover"] = scene.cloud_cover
+        result["scenes_used"] = 1
+        response.headers["Cache-Control"] = f"public, max-age={FULL_EXTENT_CACHE_SECONDS}"
+        return result
+
+    scenes, start_date, end_date = await _find_coverage_scenes(
+        bbox[1], bbox[3], bbox[0], bbox[2], start_date, end_date, max_cloud_cover
+    )
+    scene = scenes[0]
+    effective_max_size = max_size if max_size is not None else 512
 
     try:
         result = await sentinel_cog_service.get_truecolor(
             scene_id=scene.id,
             assets=scene.assets,
             bbox=bbox,
-            max_size=max_size,
+            max_size=effective_max_size,
             format=format,
             scenes=scenes,
         )
@@ -295,10 +415,19 @@ def _interpret_ndmi(stats: dict[str, float]) -> dict[str, Any]:
 
 @router.get("/ndvi-cog")
 async def get_ndvi_cog(
-    min_lat: Annotated[float, Query(ge=-90, le=90, description="South bound")],
-    max_lat: Annotated[float, Query(ge=-90, le=90, description="North bound")],
-    min_lon: Annotated[float, Query(ge=-180, le=180, description="West bound")],
-    max_lon: Annotated[float, Query(ge=-180, le=180, description="East bound")],
+    response: Response,
+    min_lat: Annotated[
+        float | None, Query(ge=-90, le=90, description="South bound (optional; all-or-none)")
+    ] = None,
+    max_lat: Annotated[
+        float | None, Query(ge=-90, le=90, description="North bound (optional; all-or-none)")
+    ] = None,
+    min_lon: Annotated[
+        float | None, Query(ge=-180, le=180, description="West bound (optional; all-or-none)")
+    ] = None,
+    max_lon: Annotated[
+        float | None, Query(ge=-180, le=180, description="East bound (optional; all-or-none)")
+    ] = None,
     start_date: Annotated[
         str | None,
         Query(
@@ -313,7 +442,9 @@ async def get_ndvi_cog(
     max_cloud_cover: Annotated[
         float, Query(ge=0, le=100, description="Max cloud cover percentage")
     ] = 20.0,
-    max_size: Annotated[int, Query(ge=64, le=2048, description="Max pixel dimension")] = 512,
+    max_size: Annotated[
+        int | None, Query(ge=64, le=2048, description="Max pixel dimension")
+    ] = None,
     format: Annotated[
         str, Query(description="Response format: 'stats' (default) or 'raster' (GeoTIFF + stats)")
     ] = "stats",
@@ -321,21 +452,56 @@ async def get_ndvi_cog(
 ):
     """Get NDVI via direct S3 COG access.
 
-    Convenience endpoint: finds the clearest recent scene and computes
-    NDVI = (B08 - B04) / (B08 + B04). Includes vegetation_status
-    interpretation matching the Copernicus endpoint.
+    Computes NDVI = (B08 - B04) / (B08 + B04) and includes vegetation_status.
+
+    When bbox is omitted, returns the full native extent of the single
+    most-recent cloud-free primary scene (via pyramid overviews). When
+    bbox is provided, crops to the bbox and stitches across MGRS tiles.
 
     Data source: AWS sentinel-cogs S3 bucket via Earth Search STAC API.
     """
     if format not in ("stats", "raster"):
         raise HTTPException(status_code=400, detail="format must be 'stats' or 'raster'")
 
-    scenes, start_date, end_date = await _find_coverage_scenes(
-        min_lat, max_lat, min_lon, max_lon, start_date, end_date, max_cloud_cover
-    )
+    bbox = _validate_all_or_none_bbox(min_lat, max_lat, min_lon, max_lon)
 
+    if bbox is None:
+        scene, start_date, end_date = await _find_single_best_scene(
+            settings.sentinel_default_bbox, start_date, end_date, max_cloud_cover
+        )
+        effective_max_size = max_size if max_size is not None else settings.overview_max_size
+        try:
+            result = await sentinel_cog_service.compute_index(
+                scene_id=scene.id,
+                assets=scene.assets,
+                index_name="ndvi",
+                bbox=None,
+                max_size=effective_max_size,
+                format=format,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"COG read error: {e}")
+
+        result["ndvi"] = {
+            "mean": round(result["stats"]["mean"], 3),
+            "min": round(result["stats"]["min"], 3),
+            "max": round(result["stats"]["max"], 3),
+            **_interpret_ndvi(result["stats"]),
+        }
+        result["date_range"] = {"start": start_date, "end": end_date}
+        result["datetime"] = scene.datetime
+        result["cloud_cover"] = scene.cloud_cover
+        result["scenes_used"] = 1
+        response.headers["Cache-Control"] = f"public, max-age={FULL_EXTENT_CACHE_SECONDS}"
+        return result
+
+    scenes, start_date, end_date = await _find_coverage_scenes(
+        bbox[1], bbox[3], bbox[0], bbox[2], start_date, end_date, max_cloud_cover
+    )
     scene = scenes[0]
-    bbox = (min_lon, min_lat, max_lon, max_lat)
+    effective_max_size = max_size if max_size is not None else 512
 
     try:
         result = await sentinel_cog_service.compute_index(
@@ -343,7 +509,7 @@ async def get_ndvi_cog(
             assets=scene.assets,
             index_name="ndvi",
             bbox=bbox,
-            max_size=max_size,
+            max_size=effective_max_size,
             format=format,
             scenes=scenes,
         )
@@ -352,7 +518,6 @@ async def get_ndvi_cog(
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"COG read error: {e}")
 
-    # Add interpretation and scene metadata
     result["ndvi"] = {
         "mean": round(result["stats"]["mean"], 3),
         "min": round(result["stats"]["min"], 3),
@@ -373,10 +538,19 @@ async def get_ndvi_cog(
 
 @router.get("/ndmi-cog")
 async def get_ndmi_cog(
-    min_lat: Annotated[float, Query(ge=-90, le=90, description="South bound")],
-    max_lat: Annotated[float, Query(ge=-90, le=90, description="North bound")],
-    min_lon: Annotated[float, Query(ge=-180, le=180, description="West bound")],
-    max_lon: Annotated[float, Query(ge=-180, le=180, description="East bound")],
+    response: Response,
+    min_lat: Annotated[
+        float | None, Query(ge=-90, le=90, description="South bound (optional; all-or-none)")
+    ] = None,
+    max_lat: Annotated[
+        float | None, Query(ge=-90, le=90, description="North bound (optional; all-or-none)")
+    ] = None,
+    min_lon: Annotated[
+        float | None, Query(ge=-180, le=180, description="West bound (optional; all-or-none)")
+    ] = None,
+    max_lon: Annotated[
+        float | None, Query(ge=-180, le=180, description="East bound (optional; all-or-none)")
+    ] = None,
     start_date: Annotated[
         str | None,
         Query(
@@ -391,7 +565,9 @@ async def get_ndmi_cog(
     max_cloud_cover: Annotated[
         float, Query(ge=0, le=100, description="Max cloud cover percentage")
     ] = 20.0,
-    max_size: Annotated[int, Query(ge=64, le=2048, description="Max pixel dimension")] = 512,
+    max_size: Annotated[
+        int | None, Query(ge=64, le=2048, description="Max pixel dimension")
+    ] = None,
     format: Annotated[
         str, Query(description="Response format: 'stats' (default) or 'raster' (GeoTIFF + stats)")
     ] = "stats",
@@ -399,21 +575,57 @@ async def get_ndmi_cog(
 ):
     """Get NDMI via direct S3 COG access.
 
-    Convenience endpoint: finds the clearest recent scene and computes
-    NDMI = (B08 - B11) / (B08 + B11). Includes moisture_status and
-    fire_risk interpretation matching the Copernicus endpoint.
+    Computes NDMI = (B08 - B11) / (B08 + B11) and includes moisture_status
+    and fire_risk interpretation.
+
+    When bbox is omitted, returns the full native extent of the single
+    most-recent cloud-free primary scene (via pyramid overviews). When
+    bbox is provided, crops to the bbox and stitches across MGRS tiles.
 
     Data source: AWS sentinel-cogs S3 bucket via Earth Search STAC API.
     """
     if format not in ("stats", "raster"):
         raise HTTPException(status_code=400, detail="format must be 'stats' or 'raster'")
 
-    scenes, start_date, end_date = await _find_coverage_scenes(
-        min_lat, max_lat, min_lon, max_lon, start_date, end_date, max_cloud_cover
-    )
+    bbox = _validate_all_or_none_bbox(min_lat, max_lat, min_lon, max_lon)
 
+    if bbox is None:
+        scene, start_date, end_date = await _find_single_best_scene(
+            settings.sentinel_default_bbox, start_date, end_date, max_cloud_cover
+        )
+        effective_max_size = max_size if max_size is not None else settings.overview_max_size
+        try:
+            result = await sentinel_cog_service.compute_index(
+                scene_id=scene.id,
+                assets=scene.assets,
+                index_name="ndmi",
+                bbox=None,
+                max_size=effective_max_size,
+                format=format,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"COG read error: {e}")
+
+        result["ndmi"] = {
+            "mean": round(result["stats"]["mean"], 3),
+            "min": round(result["stats"]["min"], 3),
+            "max": round(result["stats"]["max"], 3),
+            **_interpret_ndmi(result["stats"]),
+        }
+        result["date_range"] = {"start": start_date, "end": end_date}
+        result["datetime"] = scene.datetime
+        result["cloud_cover"] = scene.cloud_cover
+        result["scenes_used"] = 1
+        response.headers["Cache-Control"] = f"public, max-age={FULL_EXTENT_CACHE_SECONDS}"
+        return result
+
+    scenes, start_date, end_date = await _find_coverage_scenes(
+        bbox[1], bbox[3], bbox[0], bbox[2], start_date, end_date, max_cloud_cover
+    )
     scene = scenes[0]
-    bbox = (min_lon, min_lat, max_lon, max_lat)
+    effective_max_size = max_size if max_size is not None else 512
 
     try:
         result = await sentinel_cog_service.compute_index(
@@ -421,7 +633,7 @@ async def get_ndmi_cog(
             assets=scene.assets,
             index_name="ndmi",
             bbox=bbox,
-            max_size=max_size,
+            max_size=effective_max_size,
             format=format,
             scenes=scenes,
         )
@@ -430,7 +642,6 @@ async def get_ndmi_cog(
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"COG read error: {e}")
 
-    # Add interpretation and scene metadata
     result["ndmi"] = {
         "mean": round(result["stats"]["mean"], 3),
         "min": round(result["stats"]["min"], 3),

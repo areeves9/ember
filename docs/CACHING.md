@@ -103,6 +103,35 @@ cache_key = f"reverse:{lat:.4f},{lon:.4f}:{zoom}"
 | Weather | 300s (5 min) | 500 entries | Clear all when full |
 | Geocode | 86400s (24 hr) | 1000 entries | Clear all when full |
 
+## Full-Extent Raster Caching (ORQ-140)
+
+COG-backed imagery endpoints accept an optional bbox. When bbox is **omitted**,
+Ember reads a downsampled overview of the full native extent (rio-tiler's
+`Reader.preview(max_size=...)`) and returns the result with a browser-cache
+`Cache-Control` header, since the response is far more reusable than a
+viewport-scoped crop.
+
+| Endpoint | No-Bbox Cache Key | Server TTL | `Cache-Control` TTL |
+|----------|-------------------|------------|---------------------|
+| `/terrain?format=raster` | `raster:{layer}:full:{max_size}` | 24 h | `public, max-age=86400` |
+| `/imagery/truecolor-cog` | `{format}:preview:{scene_id}:B04,B03,B02:{max_size}` | 24 h | `public, max-age=21600` |
+| `/imagery/ndvi-cog` | `idx:ndvi:{format}:preview:{scene_id}:B08,B04:{max_size}` | 24 h | `public, max-age=21600` |
+| `/imagery/ndmi-cog` | `idx:ndmi:{format}:preview:{scene_id}:B08,B11:{max_size}` | 24 h | `public, max-age=21600` |
+
+**Rationale:**
+- Full-extent reads are keyed only by layer + overview size (no viewport), so
+  cache hit rate is naturally high — different users get the same bytes.
+- LANDFIRE data updates annually → long (24 h) `Cache-Control`.
+- Sentinel-2 NRT scenes publish every 3-5 days per MGRS tile → 6 h
+  `Cache-Control` is a safe buffer within a single session without staling
+  against new acquisitions.
+- Bbox-scoped responses deliberately do **not** carry long `Cache-Control`
+  because they vary per-viewport and per-user.
+
+**Knobs:** `OVERVIEW_MAX_SIZE` (default `1200`) caps the output dimension.
+`SENTINEL_DEFAULT_REGION` (default `-125,24,-66,50` — CONUS) seeds the STAC
+search when bbox is omitted on Sentinel-2 endpoints.
+
 ## Implementation Pattern
 
 All caches follow the same pattern:

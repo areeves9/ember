@@ -180,6 +180,27 @@ class SentinelCOGService:
                 )
                 return img.data[0].astype(np.float32)  # Single band → 2D float array
 
+    def _read_band_preview_sync(
+        self,
+        href: str,
+        max_size: int,
+    ) -> tuple[np.ndarray, tuple[float, float, float, float]]:
+        """Read a full-scene preview of a band via overview selection.
+
+        Returns (array, bbox_wgs84) where bbox is the scene's native bounds
+        reprojected to EPSG:4326.
+        """
+        with _sentinel_env():
+            with Reader(href) as src:
+                img = src.preview(
+                    max_size=max_size,
+                    resampling_method="bilinear",
+                    dst_crs="EPSG:4326",
+                )
+                bounds = img.bounds
+                bbox_wgs84 = (bounds.left, bounds.bottom, bounds.right, bounds.top)
+                return img.data[0].astype(np.float32), bbox_wgs84
+
     async def read_bands(
         self,
         assets: dict[str, str],
@@ -199,6 +220,33 @@ class SentinelCOGService:
         ]
         results = await asyncio.gather(*tasks)
         return dict(zip(bands, results))
+
+    async def read_bands_preview(
+        self,
+        assets: dict[str, str],
+        bands: list[str],
+        max_size: int,
+    ) -> tuple[dict[str, np.ndarray], tuple[float, float, float, float]]:
+        """Read full-scene previews for multiple bands in parallel.
+
+        Returns (band_arrays, scene_bbox_wgs84). All bands share the scene's
+        native footprint, so bbox comes from the first band read.
+        """
+        missing = [b for b in bands if b not in assets]
+        if missing:
+            raise ValueError(f"Bands not available in scene assets: {missing}")
+
+        loop = asyncio.get_running_loop()
+        tasks = [
+            loop.run_in_executor(
+                self._executor, self._read_band_preview_sync, assets[band], max_size
+            )
+            for band in bands
+        ]
+        results = await asyncio.gather(*tasks)
+        arrays = {band: result[0] for band, result in zip(bands, results)}
+        scene_bbox = results[0][1]  # All bands share the same scene footprint
+        return arrays, scene_bbox
 
     async def read_bands_mosaic(
         self,
@@ -287,27 +335,44 @@ class SentinelCOGService:
         self,
         scene_id: str,
         assets: dict[str, str],
-        bbox: tuple[float, float, float, float],
+        bbox: tuple[float, float, float, float] | None,
         max_size: int = 512,
         format: str = "png",
         scenes: list | None = None,
     ) -> dict[str, Any]:
         """Read RGB bands and compose true-color image with 2.5x gain.
 
-        If `scenes` is provided, reads from multiple scenes and stitches
-        them into a mosaic for full bbox coverage.
+        If `bbox` is None, reads the full scene via pyramid overviews
+        (no stitching — single primary scene). If `scenes` is provided
+        and `bbox` is set, reads from multiple scenes and stitches them
+        into a mosaic for full bbox coverage.
         """
-        scenes_key = "+".join(s.id for s in scenes) if scenes and len(scenes) > 1 else scene_id
-        cache_key = f"{format}:{_band_cache_key(scenes_key, ['B04', 'B03', 'B02'], bbox, max_size)}"
-        cached = _get_cached_band_read(cache_key)
-        if cached:
-            logger.debug(f"Band cache hit: {cache_key}")
-            return cached
-
-        if scenes and len(scenes) > 1:
-            band_data = await self.read_bands_mosaic(scenes, ["B04", "B03", "B02"], bbox, max_size)
+        if bbox is None:
+            cache_key = f"{format}:preview:{scene_id}:B04,B03,B02:{max_size}"
+            cached = _get_cached_band_read(cache_key)
+            if cached:
+                logger.debug(f"Band cache hit (preview): {cache_key}")
+                return cached
+            band_data, effective_bbox = await self.read_bands_preview(
+                assets, ["B04", "B03", "B02"], max_size
+            )
         else:
-            band_data = await self.read_bands(assets, ["B04", "B03", "B02"], bbox, max_size)
+            scenes_key = "+".join(s.id for s in scenes) if scenes and len(scenes) > 1 else scene_id
+            cache_key = (
+                f"{format}:{_band_cache_key(scenes_key, ['B04', 'B03', 'B02'], bbox, max_size)}"
+            )
+            cached = _get_cached_band_read(cache_key)
+            if cached:
+                logger.debug(f"Band cache hit: {cache_key}")
+                return cached
+
+            if scenes and len(scenes) > 1:
+                band_data = await self.read_bands_mosaic(
+                    scenes, ["B04", "B03", "B02"], bbox, max_size
+                )
+            else:
+                band_data = await self.read_bands(assets, ["B04", "B03", "B02"], bbox, max_size)
+            effective_bbox = bbox
 
         # Stack RGB (B04=Red, B03=Green, B02=Blue) and apply 2.5x gain
         rgb = np.stack([band_data["B04"], band_data["B03"], band_data["B02"]], axis=0)
@@ -319,12 +384,12 @@ class SentinelCOGService:
         if format == "png":
             raster = _encode_raster_png(rgb_scaled)
         else:
-            raster = encode_raster_geotiff(rgb_scaled, bbox, dtype="uint8")
+            raster = encode_raster_geotiff(rgb_scaled, effective_bbox, dtype="uint8")
 
         result = {
             "status": "success",
             "scene_id": scene_id,
-            "bbox": list(bbox),
+            "bbox": list(effective_bbox),
             "bands": ["B04", "B03", "B02"],
             "raster": raster,
             "source": "Sentinel-2 L2A (AWS COG)",
@@ -338,15 +403,17 @@ class SentinelCOGService:
         scene_id: str,
         assets: dict[str, str],
         index_name: str,
-        bbox: tuple[float, float, float, float],
+        bbox: tuple[float, float, float, float] | None,
         max_size: int = 512,
         format: str = "raster",
         scenes: list | None = None,
     ) -> dict[str, Any]:
         """Compute a spectral index from band math.
 
-        If `scenes` is provided, reads from multiple scenes and stitches
-        them into a mosaic for full bbox coverage.
+        If `bbox` is None, computes over the full scene via pyramid overviews
+        (no stitching — single primary scene). If `scenes` is provided and
+        `bbox` is set, reads from multiple scenes and stitches them into a
+        mosaic for full bbox coverage.
         """
         index_name = index_name.lower()
         if index_name not in INDEX_FORMULAS:
@@ -356,19 +423,36 @@ class SentinelCOGService:
 
         band_a_name, band_b_name = INDEX_FORMULAS[index_name]
 
-        scenes_key = "+".join(s.id for s in scenes) if scenes and len(scenes) > 1 else scene_id
-        cache_key = _band_cache_key(scenes_key, [band_a_name, band_b_name], bbox, max_size)
-        cached = _get_cached_band_read(f"idx:{index_name}:{format}:{cache_key}")
-        if cached:
-            logger.debug(f"Index cache hit: {index_name} {cache_key}")
-            return cached
-
-        if scenes and len(scenes) > 1:
-            band_data = await self.read_bands_mosaic(
-                scenes, [band_a_name, band_b_name], bbox, max_size
+        if bbox is None:
+            cache_key = (
+                f"idx:{index_name}:{format}:preview:{scene_id}:"
+                f"{band_a_name},{band_b_name}:{max_size}"
+            )
+            cached = _get_cached_band_read(cache_key)
+            if cached:
+                logger.debug(f"Index cache hit (preview): {index_name} {scene_id}")
+                return cached
+            band_data, effective_bbox = await self.read_bands_preview(
+                assets, [band_a_name, band_b_name], max_size
             )
         else:
-            band_data = await self.read_bands(assets, [band_a_name, band_b_name], bbox, max_size)
+            scenes_key = "+".join(s.id for s in scenes) if scenes and len(scenes) > 1 else scene_id
+            base_key = _band_cache_key(scenes_key, [band_a_name, band_b_name], bbox, max_size)
+            cache_key = f"idx:{index_name}:{format}:{base_key}"
+            cached = _get_cached_band_read(cache_key)
+            if cached:
+                logger.debug(f"Index cache hit: {index_name} {base_key}")
+                return cached
+
+            if scenes and len(scenes) > 1:
+                band_data = await self.read_bands_mosaic(
+                    scenes, [band_a_name, band_b_name], bbox, max_size
+                )
+            else:
+                band_data = await self.read_bands(
+                    assets, [band_a_name, band_b_name], bbox, max_size
+                )
+            effective_bbox = bbox
 
         a = band_data[band_a_name]
         b = band_data[band_b_name]
@@ -404,16 +488,16 @@ class SentinelCOGService:
             "status": "success",
             "scene_id": scene_id,
             "index": index_name.upper(),
-            "bbox": list(bbox),
+            "bbox": list(effective_bbox),
             "bands_used": [band_a_name, band_b_name],
             "stats": stats,
             "source": "Sentinel-2 L2A (AWS COG)",
         }
 
         if format == "raster":
-            result["raster"] = encode_raster_geotiff(index_values, bbox)
+            result["raster"] = encode_raster_geotiff(index_values, effective_bbox)
 
-        _cache_band_read(f"idx:{index_name}:{format}:{cache_key}", result)
+        _cache_band_read(cache_key, result)
         return result
 
 

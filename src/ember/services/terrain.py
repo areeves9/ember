@@ -463,6 +463,142 @@ class TerrainService:
         idx = int((degrees + 22.5) / 45)
         return directions[idx]
 
+    async def query_terrain_full_extent_raster(
+        self,
+        layer: str,
+        max_size: int | None = None,
+    ) -> dict[str, Any]:
+        """Query a terrain layer at its full native extent via COG overviews.
+
+        Reads a downsampled preview of the entire COG using rio-tiler's
+        pyramid overview selection. For LANDFIRE CONUS layers at 30m native
+        resolution, returns roughly 1200x793 px at the ~5km/pixel overview.
+
+        Args:
+            layer: Layer name (elevation, slope, fuel, etc.)
+            max_size: Max pixel dimension (default settings.overview_max_size)
+
+        Returns:
+            Dict with base64-encoded GeoTIFF, stats, and the layer's native bounds.
+        """
+        if max_size is None:
+            max_size = settings.overview_max_size
+        if max_size <= 0 or max_size > 2048:
+            return {"status": "error", "message": "max_size must be between 1 and 2048"}
+
+        if layer not in self._layer_urls:
+            return {
+                "status": "error",
+                "message": f"Layer '{layer}' not available. Available: {self.available_layers}",
+            }
+
+        url = self._layer_urls[layer]
+        cache_key = f"raster:{layer}:full:{max_size}"
+        cached = _get_cached_raster(cache_key)
+        if cached:
+            logger.debug(f"Full-extent raster cache hit: {cache_key}")
+            return cached
+
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                self._executor,
+                self._read_full_extent_raster,
+                url,
+                layer,
+                max_size,
+            )
+            if result.get("status") == "success":
+                _cache_raster(cache_key, result)
+            return result
+        except Exception as e:
+            logger.error(f"Full-extent raster query failed for {layer}: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "message": "Failed to query terrain raster. Please check coordinates and try again.",
+            }
+
+    def _read_full_extent_raster(
+        self,
+        url: str,
+        layer: str,
+        max_size: int,
+    ) -> dict[str, Any]:
+        """Read full-extent preview via rio-tiler's overview selection (runs in thread pool)."""
+        resampling_method = "nearest" if layer in CATEGORICAL_LAYERS else "bilinear"
+
+        with Reader(url) as src:
+            info = src.info()
+            img = src.preview(
+                max_size=max_size,
+                resampling_method=resampling_method,
+                dst_crs="EPSG:4326",
+            )
+            data = img.data
+            if data.size == 0:
+                return {"status": "no_data", "message": "No data in raster"}
+
+            actual_bounds = img.bounds
+            height, width = data.shape[1], data.shape[2]
+            transform = rasterio.transform.from_bounds(
+                actual_bounds.left,
+                actual_bounds.bottom,
+                actual_bounds.right,
+                actual_bounds.top,
+                width,
+                height,
+            )
+
+            buffer = io.BytesIO()
+            with rasterio.open(
+                buffer,
+                "w",
+                driver="GTiff",
+                height=height,
+                width=width,
+                count=1,
+                dtype=data.dtype,
+                crs="EPSG:4326",
+                transform=transform,
+                compress="lzw",
+            ) as dst:
+                dst.write(data[0], 1)
+
+            buffer.seek(0)
+            b64_data = base64.b64encode(buffer.read()).decode("utf-8")
+
+            valid_data = data.flatten()
+            if hasattr(info, "nodata") and info.nodata is not None:
+                valid_data = valid_data[valid_data != info.nodata]
+            elif hasattr(data, "mask") and data.mask is not False:
+                valid_data = data.compressed()
+
+            if valid_data.size == 0:
+                return {"status": "no_data", "message": "No valid data in raster"}
+
+            return {
+                "status": "success",
+                "layer": layer,
+                "bbox": [
+                    actual_bounds.left,
+                    actual_bounds.bottom,
+                    actual_bounds.right,
+                    actual_bounds.top,
+                ],
+                "raster": {
+                    "format": "geotiff",
+                    "encoding": "base64",
+                    "data": b64_data,
+                    "width": width,
+                    "height": height,
+                },
+                "stats": {
+                    "min": float(valid_data.min()),
+                    "max": float(valid_data.max()),
+                    "mean": float(valid_data.mean()),
+                },
+            }
+
     async def query_terrain_bbox_raster(
         self,
         min_lat: float,
