@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Unit tests for Sentinel-2 COG reader service."""
 
+import io
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+import rasterio
 
 from ember.services.sentinel_cog import (
     INDEX_FORMULAS,
     SentinelCOGService,
     _band_cache,
     _band_cache_key,
+    encode_raster_geotiff,
 )
 from ember.services.stac import Scene
 
@@ -426,3 +429,64 @@ class TestReadBandsMosaic:
 
         mock_mosaic.assert_called_once()
         assert result["status"] == "success"
+
+
+# =============================================================================
+# encode_raster_geotiff — nodata tag (ORQ-141 Phase 2)
+# =============================================================================
+
+
+SAMPLE_BBOX = (-118.5, 34.0, -118.0, 34.5)
+
+
+class TestEncodeRasterGeotiffNodata:
+    """Verify that encode_raster_geotiff always writes nodata=0 into the GeoTIFF profile.
+
+    Phase 2 of ORQ-141: without this tag, renderers treat zero-valued pixels
+    (the mosaic nodata sentinel) as opaque rather than transparent.
+    """
+
+    def _decode(self, result: dict) -> rasterio.DatasetReader:
+        """Decode a base64 GeoTIFF result dict back into a rasterio dataset."""
+        import base64
+
+        raw = base64.b64decode(result["data"])
+        return rasterio.open(io.BytesIO(raw))
+
+    def test_float32_single_band_has_nodata_zero(self):
+        """1-band float32 output (spectral index) carries nodata=0."""
+        data = np.zeros((32, 32), dtype=np.float32)
+        data[5:10, 5:10] = 0.6  # some non-zero pixels
+
+        result = encode_raster_geotiff(data, SAMPLE_BBOX, dtype="float32")
+
+        with self._decode(result) as ds:
+            assert ds.nodata == 0, f"Expected nodata=0, got {ds.nodata}"
+
+    def test_uint8_three_band_has_nodata_zero(self):
+        """3-band uint8 output (truecolor raster) carries nodata=0."""
+        data = np.zeros((3, 32, 32), dtype=np.uint8)
+        data[:, 5:10, 5:10] = 128  # some non-zero RGB pixels
+
+        result = encode_raster_geotiff(data, SAMPLE_BBOX, dtype="uint8")
+
+        with self._decode(result) as ds:
+            assert ds.nodata == 0, f"Expected nodata=0, got {ds.nodata}"
+
+    def test_nodata_zero_present_when_array_is_all_zeros(self):
+        """All-zero array (fully uncovered mosaic gap) still has nodata=0 tag."""
+        data = np.zeros((16, 16), dtype=np.float32)
+
+        result = encode_raster_geotiff(data, SAMPLE_BBOX, dtype="float32")
+
+        with self._decode(result) as ds:
+            assert ds.nodata == 0
+
+    def test_nodata_zero_present_when_array_has_no_zeros(self):
+        """Array with no zero pixels still carries the nodata=0 tag."""
+        data = np.ones((16, 16), dtype=np.float32) * 0.75
+
+        result = encode_raster_geotiff(data, SAMPLE_BBOX, dtype="float32")
+
+        with self._decode(result) as ds:
+            assert ds.nodata == 0
