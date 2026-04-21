@@ -229,8 +229,7 @@ async def get_truecolor_cog(
             ge=64,
             le=2048,
             description=(
-                "Max pixel dimension (default 512 for bbox, "
-                "overview_max_size for full-extent)"
+                "Max pixel dimension (default 512 for bbox, overview_max_size for full-extent)"
             ),
         ),
     ] = None,
@@ -303,6 +302,7 @@ async def get_truecolor_cog(
     result["datetime"] = scene.datetime
     result["cloud_cover"] = scene.cloud_cover
     result["scenes_used"] = len(scenes)
+    response.headers["Cache-Control"] = f"public, max-age={settings.bbox_cache_seconds}"
     return result
 
 
@@ -528,6 +528,7 @@ async def get_ndvi_cog(
     result["datetime"] = scene.datetime
     result["cloud_cover"] = scene.cloud_cover
     result["scenes_used"] = len(scenes)
+    response.headers["Cache-Control"] = f"public, max-age={settings.bbox_cache_seconds}"
     return result
 
 
@@ -652,4 +653,5 @@ async def get_ndmi_cog(
     result["datetime"] = scene.datetime
     result["cloud_cover"] = scene.cloud_cover
     result["scenes_used"] = len(scenes)
+    response.headers["Cache-Control"] = f"public, max-age={settings.bbox_cache_seconds}"
     return result

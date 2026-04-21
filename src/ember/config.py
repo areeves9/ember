@@ -75,6 +75,22 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Bbox-scoped raster caching (ORQ-141)
+    sentinel_search_windows: list[int] = Field(
+        default=[30, 60, 90],
+        description=(
+            "Progressive STAC search windows in days; Phase 3 escalates "
+            "through this list when MGRS tile coverage is incomplete."
+        ),
+    )
+    bbox_cache_seconds: int = Field(
+        default=3600,
+        description=(
+            "HTTP Cache-Control max-age for bbox-scoped raster responses. "
+            "Full-extent responses keep their longer per-endpoint TTLs."
+        ),
+    )
+
     # EPA AirNow
     airnow_api_key: str = Field(default="", description="EPA AirNow API key for air quality data")
 

@@ -4,6 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Response
 
+from ember.config import settings
 from ember.services.terrain import get_terrain_service
 
 router = APIRouter(prefix="/terrain", tags=["terrain"])
@@ -191,6 +192,7 @@ async def get_terrain(
             if max_size is not None:
                 raster_kwargs["max_size"] = max_size
             result = await service.query_terrain_bbox_raster(**raster_kwargs)
+            response.headers["Cache-Control"] = f"public, max-age={settings.bbox_cache_seconds}"
             return result
         except Exception as e:
             # Note: Service layer returns generic error messages, so this is safe

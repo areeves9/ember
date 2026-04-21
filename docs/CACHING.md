@@ -132,6 +132,27 @@ viewport-scoped crop.
 `SENTINEL_DEFAULT_REGION` (default `-125,24,-66,50` — CONUS) seeds the STAC
 search when bbox is omitted on Sentinel-2 endpoints.
 
+## Bbox-Scoped Raster Caching (ORQ-141)
+
+When bbox params **are** provided, the response is viewport-specific, so the
+server TTL stays short. A 1 h browser cache is enough to cover the pan-away /
+come-back case without adding full round-trips for every small viewport move.
+
+| Endpoint | Path | `Cache-Control` TTL |
+|----------|------|---------------------|
+| `/imagery/ndvi-cog` (bbox) | bbox crop path | `public, max-age=3600` |
+| `/imagery/ndmi-cog` (bbox) | bbox crop path | `public, max-age=3600` |
+| `/imagery/truecolor-cog` (bbox) | bbox crop path | `public, max-age=3600` |
+| `/terrain?format=raster` (bbox) | bbox raster path | `public, max-age=3600` |
+
+**Rationale:** Bbox bytes are viewport-specific, so the 6 h / 24 h full-extent
+values would over-cache stale crops. One hour covers a typical user session
+(pan, zoom, come back) without meaningfully delaying freshness.
+
+**Knob:** `BBOX_CACHE_SECONDS` (default `3600`) controls the TTL. Full-extent
+responses keep their own per-endpoint values (`FULL_EXTENT_CACHE_SECONDS`) and
+are not affected by this setting.
+
 ## Implementation Pattern
 
 All caches follow the same pattern:
