@@ -2,16 +2,20 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 
-from ember.auth import require_auth
 from ember.services.terrain import get_terrain_service
 
 router = APIRouter(prefix="/terrain", tags=["terrain"])
 
+# Browser cache TTL for full-extent LANDFIRE previews (24h).
+# LANDFIRE data is updated annually, so a full day of browser caching is safe.
+FULL_EXTENT_CACHE_SECONDS = 86400
+
 
 @router.get("")
 async def get_terrain(
+    response: Response,
     # Point mode parameters (existing)
     lat: Annotated[float | None, Query(ge=-90, le=90, description="Latitude (point mode)")] = None,
     lon: Annotated[
@@ -34,7 +38,7 @@ async def get_terrain(
     layers: Annotated[
         str | None,
         Query(
-            description="Comma-separated layer names (default: all for point, required for bbox raster)"
+            description="Comma-separated layer names (default: all for point, required for raster)"
         ),
     ] = None,
     format: Annotated[
@@ -80,6 +84,42 @@ async def get_terrain(
 
     # Check for partial bbox parameters
     has_partial_bbox = any(v is not None for v in [min_lat, max_lat, min_lon, max_lon])
+
+    # Full-extent raster: format=raster with no point, no bbox → full CONUS
+    # overview for the requested layer (ORQ-140).
+    if format == "raster" and not has_point and not has_bbox and not has_partial_bbox:
+        service = get_terrain_service()
+        if not service:
+            raise HTTPException(
+                status_code=503,
+                detail="Terrain service not configured (LANDFIRE_S3_PREFIX not set)",
+            )
+        if not layers:
+            raise HTTPException(
+                status_code=400,
+                detail="Raster format requires exactly one layer. Provide 'layers' parameter.",
+            )
+        layer_list = [l.strip() for l in layers.split(",")]
+        if len(layer_list) != 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Raster format supports exactly one layer at a time.",
+            )
+        layer = layer_list[0]
+        if layer not in service.available_layers:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown layer: {layer}. Available: {service.available_layers}",
+            )
+        try:
+            kwargs: dict = {"layer": layer}
+            if max_size is not None:
+                kwargs["max_size"] = max_size
+            result = await service.query_terrain_full_extent_raster(**kwargs)
+            response.headers["Cache-Control"] = f"public, max-age={FULL_EXTENT_CACHE_SECONDS}"
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Terrain raster query failed: {str(e)}")
 
     if not has_point and not has_bbox:
         if has_partial_bbox:

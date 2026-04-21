@@ -114,7 +114,9 @@ LAYER_PATTERNS = {
 
 **Point queries** go through `COGService.point_query()` (`src/ember/services/cog.py:74`), which opens a `rio-tiler.Reader`, fetches the tile index (~16KB), then fetches only the tile containing the point (~32KB). Coordinate transformation from WGS84 to the raster's CRS is handled by pyproj.
 
-**Bbox raster queries** use `Reader.part()` (`src/ember/services/terrain.py:469`), which reads the intersection of the bbox with the raster. Categorical layers (fuel) use nearest-neighbor resampling; continuous layers (elevation, slope) use bilinear.
+**Bbox raster queries** use `Reader.part()` (`src/ember/services/terrain.py`), which reads the intersection of the bbox with the raster. Categorical layers (fuel) use nearest-neighbor resampling; continuous layers (elevation, slope) use bilinear.
+
+**Full-extent raster queries** (bbox omitted) use `Reader.preview(max_size=OVERVIEW_MAX_SIZE)` (`src/ember/services/terrain.py`), which picks the pyramid overview closest to the target pixel count. LANDFIRE CONUS COGs at 30m native resolution with overview levels `[2, 4, 8, 16, 32, 64, 128]` land on overview 128 at the default 1200px cap, producing a ~1221×793 px image at ~5km/pixel. This assumes LANDFIRE COGs were built with `gdaladdo` at publish time — if overviews are missing, rio-tiler silently falls back to full-resolution resampling, which defeats the purpose.
 
 ### Sentinel-2 Pipeline
 
@@ -142,10 +144,12 @@ Both pipelines cache results in-memory with TTL-based expiration. Cache keys rou
 | Cache | TTL | Max Entries | Key Includes |
 |-------|-----|-------------|--------------|
 | Terrain point | 30 min | 1,000 | lat, lon, layers |
-| Terrain raster | 24 hr | 100 | layer, bbox, max_size |
+| Terrain raster (bbox) | 24 hr | 100 | layer, bbox, max_size |
+| Terrain raster (full extent) | 24 hr | 100 | layer, max_size (no bbox) |
 | STAC search | 1 hr | 200 | bbox, dates, cloud cover, limit |
 | STAC scene | 1 hr | 500 | scene_id |
-| Sentinel-2 band read | 24 hr | 100 | scene_ids, bands, bbox, max_size, format |
+| Sentinel-2 band read (bbox) | 24 hr | 100 | scene_ids, bands, bbox, max_size, format |
+| Sentinel-2 band read (preview) | 24 hr | 100 | scene_id, bands, max_size, format (no bbox) |
 
 LANDFIRE data is static (updated annually), so long TTLs are safe. Sentinel-2 scenes are immutable once published, so 24hr band read caches are safe. STAC search results get 1hr TTL because new scenes are ingested as Sentinel-2 passes occur.
 
@@ -162,52 +166,264 @@ AWS_REGION=us-west-2
 EARTH_SEARCH_URL=https://earth-search.aws.element84.com/v1  # default
 ```
 
-## How to Use
+## Endpoint Contracts
 
-### LANDFIRE: Point Query
+FastAPI auto-generates interactive contract docs at `/docs` (Swagger UI) and
+`/openapi.json` — those are the source of truth for live schemas. The sections
+below codify the prose contract: the bbox-optional semantics, mode-switching
+rules, error envelope, and response headers. Anything non-obvious from the
+OpenAPI surface alone is documented here.
 
+All endpoints require `Authorization: Bearer <JWT>` in production. Dev mode
+(`ENVIRONMENT=development` with no auth settings) auto-authenticates.
+
+All endpoints are mounted under `/api/v1`. Paths below omit that prefix.
+
+### `GET /terrain` — LANDFIRE multi-layer query
+
+Three mutually-exclusive modes selected by query params:
+
+| Mode | Trigger | Returns |
+|------|---------|---------|
+| Point | `lat`, `lon` present | JSON, one scalar per requested layer |
+| Bbox raster | all four bbox params + `format=raster` | Base64 GeoTIFF, bbox-cropped, native resolution |
+| Full extent | no point, no bbox, `format=raster` | Base64 GeoTIFF, full CONUS via pyramid overview |
+
+**Request params — common**
+
+| Param | Type | Modes | Description |
+|-------|------|-------|-------------|
+| `layers` | CSV / single name | all | Layer names. Required (single) in raster modes; optional (default: all) in point mode. |
+| `format` | `json` / `raster` | all | Default `json`. `raster` required for bbox/full-extent modes. |
+| `max_size` | int [64, 2048] | raster modes | Max pixel dimension. Default 512 for bbox; `OVERVIEW_MAX_SIZE` (1200) for full-extent. |
+
+**Request params — point mode**
+
+| Param | Type | Required |
+|-------|------|:--------:|
+| `lat` | float [-90, 90] | ✓ |
+| `lon` | float [-180, 180] | ✓ |
+
+**Request params — bbox raster mode**
+
+| Param | Type | Required |
+|-------|------|:--------:|
+| `min_lat` / `max_lat` / `min_lon` / `max_lon` | float | all-or-none (see Bbox Contract) |
+
+Bbox must satisfy `min < max` on each axis; max span is 10° per axis.
+
+**Response — raster modes**
+
+```json
+{
+  "status": "success",
+  "layer": "fuel",
+  "bbox": [-125.0, 24.0, -66.0, 50.0],
+  "raster": {
+    "format": "geotiff",
+    "encoding": "base64",
+    "data": "<base64>",
+    "width": 1221,
+    "height": 793
+  },
+  "stats": { "min": 91.0, "max": 204.0, "mean": 165.0 }
+}
 ```
-GET /api/v1/fuel?lat=34.05&lon=-118.25
-→ { "status": "success", "fuel_model": { "code": "SH2", "type": "Shrub" } }
+
+**Status codes**
+
+| Code | Condition |
+|------|-----------|
+| 200 | Success |
+| 400 | Mixing point+bbox, partial bbox, multi-layer in raster mode, unknown layer, bbox > 10°, invalid coords |
+| 502 | Rasterio / S3 read failure |
+| 503 | `LANDFIRE_S3_PREFIX` not configured |
+
+**Response headers**
+
+| Header | Condition | Value |
+|--------|-----------|-------|
+| `Cache-Control` | Full-extent mode only | `public, max-age=86400` (24h) |
+
+**Examples**
+
+```bash
+# Point — JSON
+curl "localhost:8001/api/v1/terrain?lat=34.05&lon=-118.25"
+
+# Bbox raster — base64 GeoTIFF
+curl "localhost:8001/api/v1/terrain?min_lat=34&max_lat=34.5&min_lon=-118.5&max_lon=-118&layers=elevation&format=raster"
+
+# Full CONUS — pyramid overview + Cache-Control: 24h
+curl "localhost:8001/api/v1/terrain?format=raster&layers=fuel"
 ```
 
-### LANDFIRE: Bbox Raster
+---
 
-```
-GET /api/v1/terrain?min_lat=34.0&max_lat=34.5&min_lon=-118.5&max_lon=-118.0
-    &layers=elevation&format=raster&max_size=512
-→ { "status": "success", "raster": { "format": "geotiff", "encoding": "base64", ... } }
-```
+### `GET /fuel` — LANDFIRE FBFM40 point query
 
-### Sentinel-2: Convenience Endpoints
+Shorthand for `/terrain?layers=fuel` in point mode. Returns the Scott & Burgan
+fuel model code.
 
-These search for the clearest scene and return the result in a single call:
+| Param | Type | Required |
+|-------|------|:--------:|
+| `lat` | float [-90, 90] | ✓ |
+| `lon` | float [-180, 180] | ✓ |
 
-```
-GET /api/v1/imagery/truecolor-cog?min_lat=34.0&max_lat=34.5&min_lon=-118.5&max_lon=-118.0
-→ { "status": "success", "scene_id": "S2A_11SLT_...", "raster": { ... } }
-
-GET /api/v1/imagery/ndvi-cog?min_lat=34.0&max_lat=34.5&min_lon=-118.5&max_lon=-118.0
-→ { "status": "success", "ndvi": { "mean": 0.45, "vegetation_status": "Healthy Vegetation" } }
-
-GET /api/v1/imagery/ndmi-cog?min_lat=34.0&max_lat=34.5&min_lon=-118.5&max_lon=-118.0
-→ { "status": "success", "ndmi": { "mean": 0.15, "moisture_status": "Moderate", "fire_risk": "Low" } }
+**Response**
+```json
+{ "status": "success", "fuel_model": { "code": "SH2", "type": "Shrub" } }
 ```
 
-### Sentinel-2: Scene-Aware Endpoints
+**Status codes:** `200`, `400` (invalid coords), `502`, `503`.
 
-For power users who need scene-level control:
+---
 
+### `GET /imagery/{ndvi-cog, ndmi-cog, truecolor-cog}` — Sentinel-2 convenience
+
+Three endpoints sharing the same contract shape. They search STAC for the
+clearest recent scene(s), read the required bands from public AWS COGs, and
+return results in a single call.
+
+**Two modes** selected by bbox presence:
+
+| Mode | Trigger | Scene selection | Stitching |
+|------|---------|-----------------|:---------:|
+| Full extent | no bbox params | Single most-recent cloud-free scene inside `SENTINEL_DEFAULT_REGION` (default CONUS `-125,24,-66,50`) | No |
+| Bbox crop | all four bbox params | Best scene per MGRS tile intersecting the bbox | Yes, if >1 tile |
+
+See [Bbox Contract](#bbox-contract) for partial-bbox handling.
+
+**Request params** (all endpoints)
+
+| Param | Type | Required | Description |
+|-------|------|:--------:|-------------|
+| `min_lat` / `max_lat` / `min_lon` / `max_lon` | float | all-or-none | Bbox (max 10° per axis). Omitted → full-extent mode. |
+| `start_date` / `end_date` | YYYY-MM-DD | — | Scene date range (default: 30 days ago → today) |
+| `max_cloud_cover` | float [0, 100] | — | Max scene cloud cover % (default 20) |
+| `max_size` | int [64, 2048] | — | Max pixel dim. Default 512 for bbox, `OVERVIEW_MAX_SIZE` (1200) for full-extent. |
+| `format` | enum | — | `stats` (default) or `raster` for ndvi/ndmi-cog; `png` (default) or `raster` for truecolor-cog |
+
+**Response — ndvi-cog** (ndmi-cog substitutes `ndmi` + `moisture_status`/`fire_risk`)
+
+```json
+{
+  "status": "success",
+  "scene_id": "S2B_10SEH_20260415_0_L2A",
+  "datetime": "2026-04-15T18:30:00Z",
+  "cloud_cover": 3.2,
+  "scenes_used": 1,
+  "date_range": { "start": "2026-03-16", "end": "2026-04-15" },
+  "index": "NDVI",
+  "bbox": [-122.0, 37.0, -121.0, 38.0],
+  "bands_used": ["B08", "B04"],
+  "stats": { "min": -0.1, "max": 0.9, "mean": 0.42 },
+  "ndvi": { "mean": 0.42, "min": -0.1, "max": 0.9, "vegetation_status": "Healthy Vegetation" },
+  "source": "Sentinel-2 L2A (AWS COG)",
+  "raster": { "format": "geotiff", "encoding": "base64", "data": "<base64>", "width": 1098, "height": 1098 }
+}
 ```
-# Step 1: Find scenes
-GET /api/v1/scenes/search?min_lat=34.0&max_lat=34.5&min_lon=-118.5&max_lon=-118.0
-    &start_date=2026-03-01&end_date=2026-04-05&max_cloud_cover=20
-→ { "scenes": [{ "id": "S2A_11SLT_...", "cloud_cover": 5.2 }] }
 
-# Step 2: Read from a specific scene
-GET /api/v1/scenes/S2A_11SLT_.../bands?min_lat=34.0&max_lat=34.5&min_lon=-118.5&max_lon=-118.0
-→ { "raster": { ... }, "datetime": "2026-03-15T18:32:15Z" }
+The `raster` field is omitted when `format=stats`. `scenes_used` is `1` on
+full-extent, and `len(scenes)` on bbox (post MGRS-tile dedup).
+
+**Response — truecolor-cog**
+
+```json
+{
+  "status": "success",
+  "scene_id": "S2B_10SEH_20260415_0_L2A",
+  "datetime": "2026-04-15T18:30:00Z",
+  "cloud_cover": 3.2,
+  "scenes_used": 1,
+  "bbox": [-122.0, 37.0, -121.0, 38.0],
+  "bands": ["B04", "B03", "B02"],
+  "raster": { "format": "image/png", "encoding": "base64", "data": "<base64>", "width": 1200, "height": 1200 },
+  "source": "Sentinel-2 L2A (AWS COG)"
+}
 ```
+
+**Status codes**
+
+| Code | Condition |
+|------|-----------|
+| 200 | Success |
+| 400 | Invalid `format`, partial bbox, inverted coords, bbox > 10° |
+| 404 | No Sentinel-2 scenes match date range / cloud cover / region |
+| 502 | STAC API error or COG read failure |
+
+**Response headers**
+
+| Header | Condition | Value |
+|--------|-----------|-------|
+| `Cache-Control` | Full-extent mode only | `public, max-age=21600` (6h) |
+
+**Examples**
+
+```bash
+# Full scene (no bbox) — Cache-Control: 6h
+curl "localhost:8001/api/v1/imagery/ndvi-cog"
+
+# Bbox crop (may stitch across MGRS tiles)
+curl "localhost:8001/api/v1/imagery/ndvi-cog?min_lat=34&max_lat=34.5&min_lon=-118.5&max_lon=-118"
+
+# True-color as PNG
+curl "localhost:8001/api/v1/imagery/truecolor-cog?min_lat=34&max_lat=34.5&min_lon=-118.5&max_lon=-118" \
+  -o truecolor.json
+```
+
+---
+
+### `GET /scenes/*` — scene-aware endpoints
+
+For callers needing explicit scene-level control (pick a specific scene by
+date, read multiple bands individually). These endpoints predate ORQ-140 and
+**always require bbox params** — they do not participate in the bbox-optional
+contract.
+
+```bash
+# Step 1 — find scenes
+curl "localhost:8001/api/v1/scenes/search?min_lat=34&max_lat=34.5&min_lon=-118.5&max_lon=-118&start_date=2026-03-01&end_date=2026-04-05&max_cloud_cover=20"
+
+# Step 2 — read a band from a specific scene
+curl "localhost:8001/api/v1/scenes/S2A_11SLT_20260315_0_L2A/bands?min_lat=34&max_lat=34.5&min_lon=-118.5&max_lon=-118"
+```
+
+Full request/response schemas: `/docs`.
+
+---
+
+### Bbox Contract
+
+All four bbox params (`min_lat`, `max_lat`, `min_lon`, `max_lon`) behave as a
+single atomic group on the endpoints in this section:
+
+| Input | Effect |
+|-------|--------|
+| All four absent | Full-extent mode (terrain + imagery only; scenes/* rejects) |
+| All four present | Bbox-crop mode |
+| Any partial combination | `400 ValidationError` with the missing param names |
+
+Additional axis-level validation: `min < max` on both axes, each axis span ≤ 10°.
+
+### Error envelope
+
+All 4xx/5xx responses share FastAPI's error shape:
+
+```json
+{ "detail": "<human-readable message>" }
+```
+
+Examples from this pipeline:
+
+| Status | Detail (abbreviated) |
+|--------|----------------------|
+| 400 | `Incomplete bbox: missing max_lon. Provide all four (min_lat, max_lat, min_lon, max_lon) or none.` |
+| 400 | `min_lat must be less than max_lat` |
+| 400 | `Unknown layer: unobtainium. Available: [...]` |
+| 404 | `No Sentinel-2 scenes found in default region [...] between ... with cloud cover < 20%` |
+| 502 | `COG read error: <rasterio message>` |
+| 503 | `Terrain service not configured (LANDFIRE_S3_PREFIX not set)` |
 
 ### Pitfalls
 
@@ -215,6 +431,8 @@ GET /api/v1/scenes/S2A_11SLT_.../bands?min_lat=34.0&max_lat=34.5&min_lon=-118.5&
 - **Antimeridian**: Bboxes crossing the antimeridian (e.g., 170 to -170 longitude) are rejected. Known limitation.
 - **LANDFIRE coverage**: LANDFIRE only covers the US (CONUS, Alaska, Hawaii, Puerto Rico). Queries outside these bounds return `out_of_bounds`.
 - **Sentinel-2 cloud cover**: The `max_cloud_cover` filter is scene-level metadata, not pixel-level. A "10% cloud cover" scene may still have clouds over your specific bbox.
+- **Missing overviews on LANDFIRE COGs**: The full-extent `/terrain?format=raster` path relies on `gdaladdo` having been run at publish time. If overviews are missing, rio-tiler falls back to full-resolution resampling — a 156k × 101k pixel read — which is very slow. Verify with `rasterio.open(url).overviews(1)` after publishing a new layer.
+- **Partial bbox**: If any of `min_lat`/`max_lat`/`min_lon`/`max_lon` is provided, all four must be provided. A partial bbox returns `400` rather than silently defaulting to full extent.
 
 ## Testing
 
@@ -227,6 +445,7 @@ Tests are mock-based — no real S3 or STAC API access required.
 | `tests/test_terrain_router_bbox.py` | Terrain router parameter parsing and routing |
 | `tests/test_stac_service.py` | STAC search, caching, scene-to-band mapping, pick_best_per_tile |
 | `tests/test_sentinel_cog.py` | Band reads, truecolor compositing, index math, resolution mismatch, multi-scene stitching |
+| `tests/test_full_extent_overviews.py` | Bbox-optional contract (ORQ-140): all-or-none validation, no-bbox full-extent preview path, Cache-Control headers |
 | `tests/test_scenes_router.py` | All scene and imagery endpoints, auth, validation, 404/400 cases |
 
 Run all COG-related tests:

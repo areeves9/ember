@@ -63,8 +63,11 @@ Query any LANDFIRE layer at a point or as a raster for a bounding box:
 # Point query — returns JSON
 curl "localhost:8001/api/v1/terrain?lat=34.05&lon=-118.25"
 
-# Raster query — returns base64 GeoTIFF
-curl "localhost:8001/api/v1/terrain?min_lat=34&max_lat=34.5&min_lon=-118.5&max_lon=-118&layer=elevation&format=raster"
+# Raster query (bbox crop) — returns base64 GeoTIFF
+curl "localhost:8001/api/v1/terrain?min_lat=34&max_lat=34.5&min_lon=-118.5&max_lon=-118&layers=elevation&format=raster"
+
+# Raster query (full CONUS, no bbox) — pyramid overview, Cache-Control: 24h
+curl "localhost:8001/api/v1/terrain?format=raster&layers=elevation"
 ```
 
 </details>
