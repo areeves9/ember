@@ -20,6 +20,7 @@ from PIL import Image
 from rio_tiler.io import Reader
 from scipy.ndimage import zoom
 
+from ember.config import settings
 from ember.logging import get_logger
 
 logger = get_logger(__name__)
@@ -249,6 +250,35 @@ class SentinelCOGService:
         scene_bbox = results[0][1]  # All bands share the same scene footprint
         return arrays, scene_bbox
 
+    def _read_band_for_mosaic_sync(
+        self,
+        href: str,
+        bbox: tuple[float, float, float, float],
+        scene_bbox: tuple[float, float, float, float] | None,
+        max_size: int,
+    ) -> np.ndarray:
+        """Read a single band for mosaic stitching, choosing part vs preview adaptively.
+
+        Decision rule (planar degrees² ratio):
+        - viewport_area > scene_area → use .preview() (low-zoom, continental case)
+        - viewport_area <= scene_area → use .part(bbox) (high-zoom, native-res crop)
+
+        Falls back to .part(bbox) when scene_bbox is absent or malformed.
+        """
+        use_preview = False
+        if scene_bbox and len(scene_bbox) == 4:
+            viewport_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+            scene_area = (scene_bbox[2] - scene_bbox[0]) * (scene_bbox[3] - scene_bbox[1])
+            if viewport_area > scene_area:
+                use_preview = True
+        else:
+            logger.debug(f"scene_bbox missing or malformed for {href}, falling back to part()")
+
+        if use_preview:
+            array, _ = self._read_band_preview_sync(href, max_size)
+            return array
+        return self._read_band_sync(href, bbox, max_size)
+
     async def read_bands_mosaic(
         self,
         scenes: list,
@@ -261,6 +291,11 @@ class SentinelCOGService:
         Each scene covers a different MGRS tile. For each band, we read from
         every scene in parallel, then composite onto a single canvas. Pixels
         from later scenes only fill in where the canvas is still zero (nodata).
+
+        The read method is chosen per-scene based on viewport-vs-scene area:
+        continental viewports (viewport > scene) use .preview() to avoid
+        native-resolution S3 crops; tactical viewports (viewport <= scene) use
+        .part(bbox) for full-resolution detail.
         """
         if len(scenes) == 1:
             return await self.read_bands(scenes[0].assets, bands, bbox, max_size)
@@ -277,14 +312,16 @@ class SentinelCOGService:
                 logger.warning(f"Scene {scene.id} missing bands {missing}, skipping")
                 skipped_scenes.append(scene.id)
                 continue
+            scene_bbox = getattr(scene, "bbox", None)
             for band in bands:
                 read_tasks.append(
                     loop.run_in_executor(
                         self._executor,
-                        self._read_band_sync,
+                        self._read_band_for_mosaic_sync,
                         scene.assets[band],
                         bbox,
-                        max_size,
+                        scene_bbox,
+                        settings.overview_max_size,
                     )
                 )
                 task_keys.append((scene_idx, band))

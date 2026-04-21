@@ -490,3 +490,248 @@ class TestEncodeRasterGeotiffNodata:
 
         with self._decode(result) as ds:
             assert ds.nodata == 0
+
+
+# =============================================================================
+# read_bands_mosaic — adaptive read method (ORQ-141 Phase 4)
+# =============================================================================
+
+
+def _make_scene_with_bbox(
+    scene_id: str,
+    mgrs_tile: str,
+    assets: dict[str, str],
+    bbox: tuple[float, float, float, float],
+) -> Scene:
+    """Scene factory that accepts an explicit bbox."""
+    return Scene(
+        id=scene_id,
+        datetime="2026-03-15T18:00:00Z",
+        cloud_cover=5.0,
+        bbox=bbox,
+        mgrs_tile=mgrs_tile,
+        assets=assets,
+    )
+
+
+class TestReadBandsMosaicAdaptiveRead:
+    """Phase 4: per-scene adaptive read method (part vs preview) based on
+    viewport-to-scene area ratio."""
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _make_part_mock(self, array: np.ndarray) -> MagicMock:
+        """Return a mock for _read_band_sync (part path) that returns array."""
+        mock = MagicMock(return_value=array)
+        return mock
+
+    def _make_preview_mock(
+        self, array: np.ndarray, scene_bbox: tuple[float, float, float, float]
+    ) -> MagicMock:
+        """Return a mock for _read_band_preview_sync (preview path) that returns (array, bbox)."""
+        mock = MagicMock(return_value=(array, scene_bbox))
+        return mock
+
+    # ------------------------------------------------------------------
+    # Case 1: viewport much larger than scene → preview
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_viewport_larger_than_scene_uses_preview(self, cog_service):
+        """When viewport area > scene area, preview() is used and part() is NOT called."""
+        # scene covers a small 0.5° × 0.5° MGRS tile
+        small_scene_bbox = (-118.5, 34.0, -118.0, 34.5)
+        # viewport spans 10° × 10° — much larger than the scene
+        large_viewport_bbox = (-125.0, 30.0, -115.0, 40.0)
+
+        scene = _make_scene_with_bbox(
+            "S2A_SMALL",
+            "11SLT",
+            {"B04": "s3://bucket/B04.tif"},
+            small_scene_bbox,
+        )
+        data = np.ones((64, 64), dtype=np.float32) * 5000
+
+        part_mock = self._make_part_mock(data)
+        preview_mock = self._make_preview_mock(data, small_scene_bbox)
+
+        with (
+            patch.object(cog_service, "_read_band_sync", part_mock),
+            patch.object(cog_service, "_read_band_preview_sync", preview_mock),
+        ):
+            # Two scenes needed to trigger mosaic path; add a second identical scene
+            scene2 = _make_scene_with_bbox(
+                "S2B_SMALL",
+                "11SLU",
+                {"B04": "s3://bucket2/B04.tif"},
+                small_scene_bbox,
+            )
+            result = await cog_service.read_bands_mosaic(
+                [scene, scene2], ["B04"], large_viewport_bbox
+            )
+
+        assert preview_mock.call_count == 2, "preview() should be called once per scene"
+        part_mock.assert_not_called()
+        assert "B04" in result
+
+    # ------------------------------------------------------------------
+    # Case 2: viewport much smaller than scene → part
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_viewport_smaller_than_scene_uses_part(self, cog_service):
+        """When viewport area <= scene area, part() is used and preview() is NOT called."""
+        # scene covers a large 10° × 10° area
+        large_scene_bbox = (-125.0, 30.0, -115.0, 40.0)
+        # viewport is a small 0.5° × 0.5° crop inside the scene
+        small_viewport_bbox = (-118.5, 34.0, -118.0, 34.5)
+
+        scene = _make_scene_with_bbox(
+            "S2A_LARGE",
+            "11SLT",
+            {"B04": "s3://bucket/B04.tif"},
+            large_scene_bbox,
+        )
+        scene2 = _make_scene_with_bbox(
+            "S2B_LARGE",
+            "11SLU",
+            {"B04": "s3://bucket2/B04.tif"},
+            large_scene_bbox,
+        )
+        data = np.ones((64, 64), dtype=np.float32) * 5000
+
+        part_mock = self._make_part_mock(data)
+        preview_mock = self._make_preview_mock(data, large_scene_bbox)
+
+        with (
+            patch.object(cog_service, "_read_band_sync", part_mock),
+            patch.object(cog_service, "_read_band_preview_sync", preview_mock),
+        ):
+            result = await cog_service.read_bands_mosaic(
+                [scene, scene2], ["B04"], small_viewport_bbox
+            )
+
+        assert part_mock.call_count == 2, "part() should be called once per scene"
+        preview_mock.assert_not_called()
+        assert "B04" in result
+
+    # ------------------------------------------------------------------
+    # Case 3: multi-scene mixed — one preview, one part
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_mixed_scenes_use_correct_method_per_scene(self, cog_service):
+        """Continental viewport spanning two MGRS tiles: one tile smaller than viewport
+        (uses preview) and one tile larger than viewport (uses part)."""
+        # viewport: 5° × 5°
+        viewport_bbox = (-120.0, 33.0, -115.0, 38.0)  # 25 deg²
+
+        # scene_a bbox is 0.5° × 0.5° = 0.25 deg² → viewport (25) > scene → preview
+        small_bbox = (-119.5, 34.0, -119.0, 34.5)
+        # scene_b bbox is 10° × 10° = 100 deg² → viewport (25) < scene → part
+        large_bbox = (-125.0, 30.0, -115.0, 40.0)
+
+        scene_a = _make_scene_with_bbox(
+            "S2A_TILE_SMALL", "11SLT", {"B04": "s3://a/B04.tif"}, small_bbox
+        )
+        scene_b = _make_scene_with_bbox(
+            "S2B_TILE_LARGE", "11SLU", {"B04": "s3://b/B04.tif"}, large_bbox
+        )
+
+        data = np.ones((64, 64), dtype=np.float32) * 5000
+        calls_part: list[str] = []
+        calls_preview: list[str] = []
+
+        def part_side_effect(href, bbox, max_size):
+            calls_part.append(href)
+            return data
+
+        def preview_side_effect(href, max_size):
+            calls_preview.append(href)
+            return data, small_bbox  # return value ignored by mosaic path
+
+        with (
+            patch.object(cog_service, "_read_band_sync", side_effect=part_side_effect),
+            patch.object(cog_service, "_read_band_preview_sync", side_effect=preview_side_effect),
+        ):
+            result = await cog_service.read_bands_mosaic(
+                [scene_a, scene_b], ["B04"], viewport_bbox
+            )
+
+        assert len(calls_preview) == 1, f"expected 1 preview call, got {calls_preview}"
+        assert "a/B04" in calls_preview[0], "preview should be called for the small scene"
+        assert len(calls_part) == 1, f"expected 1 part call, got {calls_part}"
+        assert "b/B04" in calls_part[0], "part should be called for the large scene"
+        assert "B04" in result
+
+    # ------------------------------------------------------------------
+    # Case 4: regression — existing single-scene path unaffected
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_single_scene_delegates_to_read_bands_unchanged(self, cog_service, sample_bbox):
+        """Single-scene mosaic still delegates to read_bands (no adaptive path)."""
+        scene = _make_scene_with_bbox(
+            "S2A_SINGLE",
+            "11SLT",
+            {"B04": "s3://path/B04.tif", "B03": "s3://path/B03.tif"},
+            sample_bbox,
+        )
+        band_data = {
+            "B04": np.ones((64, 64), dtype=np.float32) * 5000,
+            "B03": np.ones((64, 64), dtype=np.float32) * 5000,
+        }
+
+        with patch.object(cog_service, "read_bands", return_value=band_data) as mock_rb:
+            result = await cog_service.read_bands_mosaic(
+                [scene], ["B04", "B03"], sample_bbox, 64
+            )
+
+        mock_rb.assert_called_once()
+        assert set(result.keys()) == {"B04", "B03"}
+
+    # ------------------------------------------------------------------
+    # Case 5: missing / None scene_bbox falls back to part
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_none_scene_bbox_falls_back_to_part(self, cog_service):
+        """Scene with bbox=None falls back to part() with a debug log (no crash)."""
+        viewport_bbox = (-125.0, 30.0, -115.0, 40.0)  # large viewport
+
+        # Manually build a scene and set bbox to None to exercise defensive path
+        scene_a = Scene(
+            id="S2A_NOBBOX",
+            datetime="2026-03-15T18:00:00Z",
+            cloud_cover=5.0,
+            bbox=None,  # type: ignore[arg-type]
+            mgrs_tile="11SLT",
+            assets={"B04": "s3://a/B04.tif"},
+        )
+        scene_b = Scene(
+            id="S2B_NOBBOX",
+            datetime="2026-03-15T18:00:00Z",
+            cloud_cover=5.0,
+            bbox=None,  # type: ignore[arg-type]
+            mgrs_tile="11SLU",
+            assets={"B04": "s3://b/B04.tif"},
+        )
+        data = np.ones((64, 64), dtype=np.float32) * 5000
+
+        part_mock = MagicMock(return_value=data)
+        preview_mock = MagicMock(return_value=(data, viewport_bbox))
+
+        with (
+            patch.object(cog_service, "_read_band_sync", part_mock),
+            patch.object(cog_service, "_read_band_preview_sync", preview_mock),
+        ):
+            result = await cog_service.read_bands_mosaic(
+                [scene_a, scene_b], ["B04"], viewport_bbox
+            )
+
+        # preview must NOT be called — fallback to part
+        preview_mock.assert_not_called()
+        assert part_mock.call_count == 2
+        assert "B04" in result
