@@ -461,7 +461,7 @@ pytest tests/test_terrain_bbox.py tests/test_terrain_raster_caching.py \
 - **No pixel-level cloud masking**: Sentinel-2 scenes include an SCL (Scene Classification Layer) band that identifies cloud pixels, but the pipeline does not use it yet. Cloud-heavy areas within an otherwise clear scene will show clouds in the imagery.
 - **Single-date per tile**: Multi-scene stitching picks one scene per MGRS tile. Adjacent tiles may come from different dates, causing slight color/lighting differences at tile boundaries.
 - **No temporal composites**: The pipeline returns data from individual scenes, not time-averaged composites. For change detection (e.g., pre/post fire NBR), the consumer must make two requests with different date ranges.
-- **Zero-pixel nodata**: The mosaic stitching uses pixel value 0 as the nodata sentinel. Sentinel-2 L2A reflectance is scaled 0-10000, so true zero reflectance is effectively impossible — but this is an assumption, not a guarantee.
+- **Zero-pixel nodata**: The mosaic stitching uses pixel value 0 as the nodata sentinel. Sentinel-2 L2A reflectance is scaled 0-10000, so true zero reflectance is effectively impossible — but this is an assumption, not a guarantee. All Sentinel-2 GeoTIFF outputs (truecolor `raster` format and all spectral index outputs) include `nodata=0` in the rasterio profile so renderers like Nova can treat zero-valued pixels as transparent rather than opaque black.
 
 ## Shared Technology Stack
 

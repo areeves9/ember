@@ -115,6 +115,7 @@ def encode_raster_geotiff(
         crs="EPSG:4326",
         transform=transform,
         compress="lzw",
+        nodata=0,
     ) as dst:
         if data.ndim == 2:
             dst.write(data, 1)
