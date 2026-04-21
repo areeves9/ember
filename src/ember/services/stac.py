@@ -246,20 +246,98 @@ class STACService:
     async def search_coverage(self, query: SceneQuery) -> list[Scene]:
         """Search for scenes and return the best one per MGRS tile.
 
-        Fetches up to 20 scenes — enough for bboxes spanning up to ~4 MGRS
-        tiles with ~5 date options per tile. A 10° bbox (max allowed) spans
-        at most 4-6 tiles, so 20 provides adequate coverage. For the typical
-        tactical viewport (~0.5°), this is 1-2 tiles.
+        Implements a progressive search loop driven by
+        ``settings.sentinel_search_windows`` (default [30, 60, 90] days).
+        The loop widens the look-back window step by step until every tile
+        identified in the first window has a best-scene assigned, or the
+        window list is exhausted.  Results from all windows are merged so
+        that tiles covered by the narrowest window keep their fresher/clearer
+        scene while tiles not yet covered pick up candidates from wider
+        windows.
+
+        **Tile-discovery limitation (Option B):** No MGRS geometry resolver
+        is available in this environment, so the required tile set is fixed
+        after the first window fires — it equals the MGRS tile IDs present in
+        the first window's STAC results.  A tile that returns no scene at all
+        within the full window history cannot be detected as missing; it will
+        render transparent on the client (Phase 2 ``nodata=0`` handles this
+        gracefully).  Tests that exercise the escalation path therefore patch
+        ``pick_best_per_tile`` to simulate an unresolvable tile so the uncovered
+        set becomes non-empty and drives further windows.  This is acceptable for
+        v1; a future slice can add an MGRS library (e.g. ``mgrs``) to
+        pre-compute bbox-intersecting tiles and detect true gaps before the
+        first query fires.
+
+        Fetches up to 20 scenes per window — enough for bboxes spanning up to
+        ~4-6 MGRS tiles with multiple date options per tile.
         """
-        coverage_query = SceneQuery(
-            bbox=query.bbox,
-            start_date=query.start_date,
-            end_date=query.end_date,
-            max_cloud_cover=query.max_cloud_cover,
-            limit=20,
-        )
-        scenes = await self.search_scenes(coverage_query)
-        return pick_best_per_tile(scenes)
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        end_date = query.end_date
+
+        accumulated_scenes: list[Scene] = []
+        best_per_tile: dict[str, Scene] = {}
+
+        # The required tile set is established after the first window.
+        # Subsequent windows only need to fill tiles that are still uncovered.
+        required_tiles: set[str] | None = None
+
+        for window_days in settings.sentinel_search_windows:
+            start_date = (now - timedelta(days=window_days)).strftime("%Y-%m-%d")
+
+            window_query = SceneQuery(
+                bbox=query.bbox,
+                start_date=start_date,
+                end_date=end_date,
+                max_cloud_cover=query.max_cloud_cover,
+                limit=20,
+            )
+            window_scenes = await self.search_scenes(window_query)
+
+            # Merge: union of all scenes seen so far.  Earlier-window (fresher)
+            # scenes appear first in the list; pick_best_per_tile keeps the
+            # lowest cloud_cover per tile, so a later-window scene only displaces
+            # an earlier one when it is clearer.
+            accumulated_scenes = accumulated_scenes + window_scenes
+            new_best = pick_best_per_tile(accumulated_scenes)
+            best_per_tile = {s.mgrs_tile or s.id: s for s in new_best}
+
+            # Fix the required tile set from the first window's results (Option B).
+            if required_tiles is None:
+                required_tiles = {s.mgrs_tile or s.id for s in window_scenes}
+
+            covered_tile_ids = set(best_per_tile.keys())
+            uncovered = required_tiles - covered_tile_ids
+
+            if not uncovered:
+                logger.info(
+                    f"search_coverage: {window_days}-day window sufficient "
+                    f"for {len(covered_tile_ids)} tile(s)"
+                )
+                break
+
+            logger.debug(
+                f"search_coverage: {window_days}-day window — "
+                f"{len(uncovered)} tile(s) still uncovered — escalating"
+            )
+        else:
+            # Loop exhausted without break — some tiles remain uncovered.
+            required_tiles = required_tiles or set()
+            uncovered = required_tiles - set(best_per_tile.keys())
+            if uncovered:
+                logger.warning(
+                    f"search_coverage: exhausted all search windows "
+                    f"({settings.sentinel_search_windows} days); "
+                    f"no scene found for tile(s): {sorted(uncovered)}"
+                )
+            else:
+                logger.info(
+                    f"search_coverage: all {len(best_per_tile)} known tile(s) covered "
+                    f"after exhausting search windows"
+                )
+
+        return list(best_per_tile.values())
 
     async def get_scene(self, scene_id: str) -> Scene | None:
         """Fetch a single scene by ID, checking cache first."""
