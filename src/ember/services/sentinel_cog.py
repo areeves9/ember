@@ -255,82 +255,131 @@ class SentinelCOGService:
         bands: list[str],
         bbox: tuple[float, float, float, float],
         max_size: int = 512,
-    ) -> dict[str, np.ndarray]:
+    ) -> tuple[dict[str, np.ndarray], tuple[float, float, float, float]]:
         """Read bands from multiple scenes and stitch into a single mosaic.
 
-        Each scene covers a different MGRS tile. For each band, we read from
-        every scene in parallel, then composite onto a single canvas. Pixels
-        from later scenes only fill in where the canvas is still zero (nodata).
+        Each scene is read at its own native MGRS tile bbox (not clipped to
+        the requested viewport), then placed in a shared output canvas at
+        its geographic offset within the union of all tile bboxes.
+
+        Returns (mosaic, effective_bbox). For multi-scene mosaics, the
+        effective bbox is the union of tile bboxes — slightly larger than
+        the requested viewport, which gives clients a panning buffer for
+        free. For the single-scene fast path, effective bbox equals the
+        requested viewport.
         """
-        if len(scenes) == 1:
-            return await self.read_bands(scenes[0].assets, bands, bbox, max_size)
-
-        # Read all bands from all scenes in parallel
-        loop = asyncio.get_running_loop()
-        read_tasks = []
-        task_keys: list[tuple[int, str]] = []  # (scene_idx, band_name)
-        skipped_scenes: list[str] = []
-
-        for scene_idx, scene in enumerate(scenes):
+        # Drop scenes missing requested bands up front.
+        valid_scenes = []
+        for scene in scenes:
             missing = [b for b in bands if b not in scene.assets]
             if missing:
                 logger.warning(f"Scene {scene.id} missing bands {missing}, skipping")
-                skipped_scenes.append(scene.id)
                 continue
+            valid_scenes.append(scene)
+
+        if not valid_scenes:
+            raise ValueError(f"No scenes contain all requested bands: {bands}")
+
+        # Single scene → viewport-clip is correct, no mosaic alignment needed.
+        if len(valid_scenes) == 1:
+            bands_dict = await self.read_bands(valid_scenes[0].assets, bands, bbox, max_size)
+            return bands_dict, bbox
+
+        # Multi-scene: union of tile bboxes is the output extent.
+        union_min_lon = min(s.bbox[0] for s in valid_scenes)
+        union_min_lat = min(s.bbox[1] for s in valid_scenes)
+        union_max_lon = max(s.bbox[2] for s in valid_scenes)
+        union_max_lat = max(s.bbox[3] for s in valid_scenes)
+        union_bbox = (union_min_lon, union_min_lat, union_max_lon, union_max_lat)
+
+        logger.info(
+            f"read_bands_mosaic: {len(valid_scenes)} tile(s), "
+            f"viewport={tuple(round(v, 4) for v in bbox)}, "
+            f"union={tuple(round(v, 4) for v in union_bbox)}"
+        )
+        for s in valid_scenes:
+            logger.debug(
+                f"  tile {s.mgrs_tile or s.id}: bbox={tuple(round(v, 4) for v in s.bbox)}"
+            )
+
+        # Output dims: longest side = max_size, preserve geographic aspect.
+        union_w_deg = union_max_lon - union_min_lon
+        union_h_deg = union_max_lat - union_min_lat
+        aspect = union_w_deg / union_h_deg
+        if aspect >= 1:
+            out_w = max_size
+            out_h = max(1, round(max_size / aspect))
+        else:
+            out_h = max_size
+            out_w = max(1, round(max_size * aspect))
+
+        def pixel_slot(s_bbox: tuple[float, float, float, float]) -> tuple[int, int, int, int]:
+            """Map a tile's geographic bbox to its (x0, y0, x1, y1) canvas slot."""
+            smin_lon, smin_lat, smax_lon, smax_lat = s_bbox
+            x0 = round((smin_lon - union_min_lon) / union_w_deg * out_w)
+            x1 = round((smax_lon - union_min_lon) / union_w_deg * out_w)
+            # Y is inverted: top of canvas = max_lat
+            y0 = round((union_max_lat - smax_lat) / union_h_deg * out_h)
+            y1 = round((union_max_lat - smin_lat) / union_h_deg * out_h)
+            return max(0, x0), max(0, y0), min(out_w, x1), min(out_h, y1)
+
+        # Read each (scene, band) at the scene's own bbox in parallel.
+        # Per-tile max_size matches its slot to avoid wasted resolution.
+        loop = asyncio.get_running_loop()
+        read_tasks = []
+        task_keys: list[tuple[int, str]] = []
+        for scene_idx, scene in enumerate(valid_scenes):
+            x0, y0, x1, y1 = pixel_slot(scene.bbox)
+            slot_max = max(64, max(x1 - x0, y1 - y0))
             for band in bands:
                 read_tasks.append(
                     loop.run_in_executor(
                         self._executor,
                         self._read_band_sync,
                         scene.assets[band],
-                        bbox,
-                        max_size,
+                        scene.bbox,
+                        slot_max,
                     )
                 )
                 task_keys.append((scene_idx, band))
 
         read_results = await asyncio.gather(*read_tasks, return_exceptions=True)
 
-        # Group results by band, then composite
-        band_layers: dict[str, list[np.ndarray]] = {b: [] for b in bands}
+        band_layers: dict[str, list[tuple[int, np.ndarray]]] = {b: [] for b in bands}
         for (scene_idx, band_name), result in zip(task_keys, read_results):
             if isinstance(result, Exception):
                 logger.warning(
-                    f"Failed to read {band_name} from scene {scenes[scene_idx].id}: {result}"
+                    f"Failed to read {band_name} from scene {valid_scenes[scene_idx].id}: {result}"
                 )
                 continue
-            band_layers[band_name].append(result)
+            band_layers[band_name].append((scene_idx, result))
 
-        # Stitch each band: start with zeros, layer scenes on top
         mosaic: dict[str, np.ndarray] = {}
         for band_name in bands:
             layers = band_layers[band_name]
             if not layers:
                 raise ValueError(f"No data for band {band_name} from any scene")
 
-            # Use the largest array dimensions as the canvas size
-            max_h = max(layer.shape[0] for layer in layers)
-            max_w = max(layer.shape[1] for layer in layers)
-
-            canvas = np.zeros((max_h, max_w), dtype=np.float32)
-            for layer in layers:
-                # Resize layer to canvas dimensions if needed
-                if layer.shape != (max_h, max_w):
-                    layer = zoom(
-                        layer,
-                        (max_h / layer.shape[0], max_w / layer.shape[1]),
+            canvas = np.zeros((out_h, out_w), dtype=np.float32)
+            for scene_idx, arr in layers:
+                x0, y0, x1, y1 = pixel_slot(valid_scenes[scene_idx].bbox)
+                slot_h, slot_w = y1 - y0, x1 - x0
+                if slot_h <= 0 or slot_w <= 0:
+                    continue
+                if arr.shape != (slot_h, slot_w):
+                    arr = zoom(
+                        arr,
+                        (slot_h / arr.shape[0], slot_w / arr.shape[1]),
                         order=1,
                     )
-                # Fill where canvas has no data. We use == 0 as the nodata
-                # sentinel — Sentinel-2 L2A reflectance is 0-10000 scaled,
-                # so true zero is only returned by rio-tiler for out-of-bounds
-                # pixels (areas outside the scene's MGRS tile).
-                mask = canvas == 0
-                canvas[mask] = layer[mask]
+                # First tile wins on overlap; canvas==0 sentinel preserves earlier fills.
+                slot = canvas[y0:y1, x0:x1]
+                mask = slot == 0
+                slot[mask] = arr[mask]
 
             mosaic[band_name] = canvas
 
-        return mosaic
+        return mosaic, union_bbox
 
     async def get_truecolor(
         self,
@@ -368,12 +417,12 @@ class SentinelCOGService:
                 return cached
 
             if scenes and len(scenes) > 1:
-                band_data = await self.read_bands_mosaic(
+                band_data, effective_bbox = await self.read_bands_mosaic(
                     scenes, ["B04", "B03", "B02"], bbox, max_size
                 )
             else:
                 band_data = await self.read_bands(assets, ["B04", "B03", "B02"], bbox, max_size)
-            effective_bbox = bbox
+                effective_bbox = bbox
 
         # Stack RGB (B04=Red, B03=Green, B02=Blue) and apply 2.5x gain
         rgb = np.stack([band_data["B04"], band_data["B03"], band_data["B02"]], axis=0)
@@ -446,14 +495,14 @@ class SentinelCOGService:
                 return cached
 
             if scenes and len(scenes) > 1:
-                band_data = await self.read_bands_mosaic(
+                band_data, effective_bbox = await self.read_bands_mosaic(
                     scenes, [band_a_name, band_b_name], bbox, max_size
                 )
             else:
                 band_data = await self.read_bands(
                     assets, [band_a_name, band_b_name], bbox, max_size
                 )
-            effective_bbox = bbox
+                effective_bbox = bbox
 
         a = band_data[band_a_name]
         b = band_data[band_b_name]
