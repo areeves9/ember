@@ -221,8 +221,17 @@ async def get_truecolor_cog(
         Query(description="End date YYYY-MM-DD (default: today)", pattern=r"^\d{4}-\d{2}-\d{2}$"),
     ] = None,
     max_cloud_cover: Annotated[
-        float, Query(ge=0, le=100, description="Max cloud cover percentage")
-    ] = 20.0,
+        float,
+        Query(
+            ge=0,
+            le=100,
+            description=(
+                "Max cloud cover percentage. Default 100 — for wildfire intel, "
+                "recency beats clarity, so cloudy scenes are kept. Lower this "
+                "only if you specifically need to filter cloudy captures."
+            ),
+        ),
+    ] = 100.0,
     max_size: Annotated[
         int | None,
         Query(
@@ -440,8 +449,17 @@ async def get_ndvi_cog(
         Query(description="End date YYYY-MM-DD (default: today)", pattern=r"^\d{4}-\d{2}-\d{2}$"),
     ] = None,
     max_cloud_cover: Annotated[
-        float, Query(ge=0, le=100, description="Max cloud cover percentage")
-    ] = 20.0,
+        float,
+        Query(
+            ge=0,
+            le=100,
+            description=(
+                "Max cloud cover percentage. Default 100 — for wildfire intel, "
+                "recency beats clarity, so cloudy scenes are kept. Lower this "
+                "only if you specifically need to filter cloudy captures."
+            ),
+        ),
+    ] = 100.0,
     max_size: Annotated[
         int | None, Query(ge=64, le=2048, description="Max pixel dimension")
     ] = None,
@@ -564,8 +582,17 @@ async def get_ndmi_cog(
         Query(description="End date YYYY-MM-DD (default: today)", pattern=r"^\d{4}-\d{2}-\d{2}$"),
     ] = None,
     max_cloud_cover: Annotated[
-        float, Query(ge=0, le=100, description="Max cloud cover percentage")
-    ] = 20.0,
+        float,
+        Query(
+            ge=0,
+            le=100,
+            description=(
+                "Max cloud cover percentage. Default 100 — for wildfire intel, "
+                "recency beats clarity, so cloudy scenes are kept. Lower this "
+                "only if you specifically need to filter cloudy captures."
+            ),
+        ),
+    ] = 100.0,
     max_size: Annotated[
         int | None, Query(ge=64, le=2048, description="Max pixel dimension")
     ] = None,
