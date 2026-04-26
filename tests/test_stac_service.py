@@ -107,31 +107,49 @@ class TestItemToScene:
 
 
 class TestPickBestPerTile:
-    def _scene(self, scene_id: str, tile: str, cloud: float) -> Scene:
+    def _scene(
+        self,
+        scene_id: str,
+        tile: str,
+        dt: str = "2026-03-15T00:00:00Z",
+        cloud: float = 5.0,
+    ) -> Scene:
         return Scene(
             id=scene_id,
-            datetime="2026-03-15",
+            datetime=dt,
             cloud_cover=cloud,
             bbox=(0, 0, 1, 1),
             mgrs_tile=tile,
         )
 
     def test_one_scene_per_tile(self):
-        scenes = [self._scene("A", "11SLT", 5.0), self._scene("B", "11SLU", 10.0)]
+        scenes = [self._scene("A", "11SLT"), self._scene("B", "11SLU")]
         result = pick_best_per_tile(scenes)
         assert len(result) == 2
 
-    def test_picks_clearest_per_tile(self):
+    def test_picks_most_recent_per_tile(self):
+        """Most recent scene wins per tile, regardless of cloud cover."""
         scenes = [
-            self._scene("A1", "11SLT", 20.0),
-            self._scene("A2", "11SLT", 5.0),
-            self._scene("B1", "11SLU", 10.0),
+            # Older but clearer — should LOSE to A2 (newer) under recency ranking.
+            self._scene("A1", "11SLT", dt="2026-03-01T00:00:00Z", cloud=5.0),
+            self._scene("A2", "11SLT", dt="2026-03-15T00:00:00Z", cloud=80.0),
+            self._scene("B1", "11SLU", dt="2026-03-10T00:00:00Z", cloud=10.0),
         ]
         result = pick_best_per_tile(scenes)
         assert len(result) == 2
         ids = {s.id for s in result}
-        assert "A2" in ids  # 5% cloud, not A1 at 20%
+        assert "A2" in ids, "A2 is newer than A1 — recency wins, even at 80% cloud"
         assert "B1" in ids
+
+    def test_cloud_cover_is_not_a_tiebreaker(self):
+        """When two scenes for a tile have equal datetimes, first-seen wins."""
+        scenes = [
+            self._scene("A1", "11SLT", dt="2026-03-15T00:00:00Z", cloud=80.0),
+            self._scene("A2", "11SLT", dt="2026-03-15T00:00:00Z", cloud=5.0),
+        ]
+        result = pick_best_per_tile(scenes)
+        assert len(result) == 1
+        assert result[0].id == "A1", "Equal datetimes — first scene retained, cloud cover ignored"
 
     def test_empty_list(self):
         assert pick_best_per_tile([]) == []
@@ -481,6 +499,54 @@ class TestSearchCoverageProgressive:
             assert q.max_cloud_cover == 100.0, (
                 f"Window query should use max_cloud_cover=100.0, got {q.max_cloud_cover}"
             )
+
+    @pytest.mark.asyncio
+    async def test_fetch_limit_scales_with_required_tile_count(self, stac_service):
+        """A 30-tile bbox should request limit=60 from STAC, not the floor of 20.
+
+        Hardcoded limit=20 was the cap that systematically excluded tiles in
+        large bboxes — the limit must scale with the required tile count so
+        every tile has at least one slot in the result set.
+        """
+        captured_queries: list[SceneQuery] = []
+
+        async def mock_search_scenes(query: SceneQuery) -> list[Scene]:
+            captured_queries.append(query)
+            # Return one scene per required tile so the loop exits in window 1.
+            return [_make_scene(t) for t in self.REQUIRED_TILES]
+
+        large_tile_set = {f"99X{i:02d}" for i in range(30)}
+
+        with (
+            patch("ember.config.settings.sentinel_search_windows", [30, 60, 90]),
+            patch("ember.services.stac._intersecting_mgrs_tiles", return_value=large_tile_set),
+        ):
+            stac_service.search_scenes = mock_search_scenes
+            await stac_service.search_coverage(self.BASE_QUERY)
+
+        assert captured_queries, "Expected at least one window query"
+        # 30 required tiles × 2 = 60.
+        assert captured_queries[0].limit == 60, (
+            f"Expected limit=60 for 30-tile set, got {captured_queries[0].limit}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetch_limit_floor_is_twenty_for_small_bboxes(self, stac_service):
+        """A single-tile bbox should still get limit=20 (the floor), not 2."""
+        captured_queries: list[SceneQuery] = []
+
+        async def mock_search_scenes(query: SceneQuery) -> list[Scene]:
+            captured_queries.append(query)
+            return [_make_scene("11SLT")]
+
+        with (
+            patch("ember.config.settings.sentinel_search_windows", [30, 60, 90]),
+            patch("ember.services.stac._intersecting_mgrs_tiles", return_value={"11SLT"}),
+        ):
+            stac_service.search_scenes = mock_search_scenes
+            await stac_service.search_coverage(self.BASE_QUERY)
+
+        assert captured_queries[0].limit == 20
 
     @pytest.mark.asyncio
     async def test_exhaustion_logs_warning_for_residual_tiles(self, stac_service, caplog):

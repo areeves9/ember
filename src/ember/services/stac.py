@@ -58,7 +58,7 @@ class SceneQuery:
     bbox: tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
     start_date: str  # YYYY-MM-DD
     end_date: str  # YYYY-MM-DD
-    max_cloud_cover: float = 20.0
+    max_cloud_cover: float = 100.0
     limit: int = 5
 
 
@@ -193,16 +193,21 @@ def _item_to_scene(item: Any) -> Scene:
 
 
 def pick_best_per_tile(scenes: list[Scene]) -> list[Scene]:
-    """Select the clearest scene for each MGRS tile.
+    """Select the most recent scene for each MGRS tile.
 
     When a bbox spans multiple tiles, STAC returns multiple scenes per tile
-    (different dates). This picks the lowest cloud cover per tile so we get
-    full spatial coverage with the best quality.
+    (different dates). This picks the latest acquisition per tile — for a
+    wildfire intelligence platform, recency beats clarity. Clouds, smoke,
+    and haze are signal about current ground conditions, not noise to be
+    filtered out.
+
+    Datetime strings are RFC 3339 / ISO 8601, which sort lexicographically
+    in chronological order.
     """
     best: dict[str, Scene] = {}
     for scene in scenes:
         key = scene.mgrs_tile or scene.id
-        if key not in best or scene.cloud_cover < best[key].cloud_cover:
+        if key not in best or scene.datetime > best[key].datetime:
             best[key] = scene
     return list(best.values())
 
@@ -225,7 +230,14 @@ class STACService:
         return self._client
 
     def _search_sync(self, query: SceneQuery) -> list[Scene]:
-        """Synchronous STAC search (runs in thread pool)."""
+        """Synchronous STAC search (runs in thread pool).
+
+        Sorts by acquisition datetime descending (most recent first) and
+        applies no cloud-cover filter — for wildfire intelligence, recency
+        and ground-truth coverage outweigh visual clarity. Filtering by
+        cloud cover would systematically exclude tiles in cloudier regions
+        from the result set, leaving black voids in the rendered mosaic.
+        """
         client = self._get_client()
 
         datetime_range = f"{query.start_date}T00:00:00Z/{query.end_date}T23:59:59Z"
@@ -234,9 +246,8 @@ class STACService:
             collections=[COLLECTION],
             bbox=query.bbox,
             datetime=datetime_range,
-            query={"eo:cloud_cover": {"lt": query.max_cloud_cover}},
             max_items=query.limit,
-            sortby=[{"field": "properties.eo:cloud_cover", "direction": "asc"}],
+            sortby=[{"field": "properties.datetime", "direction": "desc"}],
         )
 
         scenes = [_item_to_scene(item) for item in search.items()]
@@ -282,26 +293,28 @@ class STACService:
             return None
 
     async def search_coverage(self, query: SceneQuery) -> list[Scene]:
-        """Search for scenes and return the best one per MGRS tile.
+        """Search for scenes and return the most recent one per MGRS tile.
 
         Implements a progressive search loop driven by
         ``settings.sentinel_search_windows`` (default [30, 60, 90] days).
         The loop widens the look-back window step by step until every MGRS tile
-        that geographically intersects the requested bbox has a best-scene
-        assigned, or the window list is exhausted.  Results from all windows are
-        merged so that tiles covered by the narrowest window keep their
-        fresher/clearer scene while tiles not yet covered pick up candidates from
-        wider windows.
+        that geographically intersects the requested bbox has a scene assigned,
+        or the window list is exhausted.  Results from all windows are merged
+        so that tiles covered by the narrowest window keep their fresher scene
+        while tiles not yet covered pick up candidates from wider windows.
 
         The required tile set is computed locally before any STAC query fires,
         using the ``mgrs`` library to sample the bbox at 0.4° intervals and
         resolve each sample to its containing 100 km MGRS grid square.  This
         means a tile that has zero scenes within the full 90-day window is
-        correctly detected as missing and named in the exhaustion warning, rather
-        than silently absent.
+        correctly detected as missing and named in the exhaustion warning,
+        rather than silently absent.
 
-        Fetches up to 20 scenes per window — enough for bboxes spanning up to
-        ~4-6 MGRS tiles with multiple date options per tile.
+        The per-window fetch limit scales with the number of required tiles
+        (``max(20, len(required_tiles) * 2)``) so a 40-tile bbox doesn't get
+        truncated to the 20 most-recent scenes overall — which would
+        systematically exclude tiles whose latest overpass was a few days
+        older than the freshest tiles in the bbox.
         """
         from datetime import datetime, timedelta, timezone
 
@@ -316,6 +329,10 @@ class STACService:
         # is now detectable and named in the exhaustion warning.
         required_tiles: set[str] = _intersecting_mgrs_tiles(query.bbox)
 
+        # Scale the fetch budget with bbox size — every required tile needs
+        # at least one slot in the result set, with headroom for variation.
+        fetch_limit = max(20, len(required_tiles) * 2)
+
         for window_days in settings.sentinel_search_windows:
             start_date = (now - timedelta(days=window_days)).strftime("%Y-%m-%d")
 
@@ -323,15 +340,13 @@ class STACService:
                 bbox=query.bbox,
                 start_date=start_date,
                 end_date=end_date,
-                max_cloud_cover=100.0,  # Accept all scenes — cloudy fill beats no fill
-                limit=20,
+                limit=fetch_limit,
             )
             window_scenes = await self.search_scenes(window_query)
 
-            # Merge: union of all scenes seen so far.  Earlier-window (fresher)
-            # scenes appear first in the list; pick_best_per_tile keeps the
-            # lowest cloud_cover per tile, so a later-window scene only displaces
-            # an earlier one when it is clearer.
+            # Merge: union of all scenes seen so far.  pick_best_per_tile keeps
+            # the most recent scene per tile, so a later-window scene only
+            # displaces an earlier one when it is fresher.
             accumulated_scenes = accumulated_scenes + window_scenes
             new_best = pick_best_per_tile(accumulated_scenes)
             best_per_tile = {s.mgrs_tile or s.id: s for s in new_best}
