@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from time import time
 from typing import Any
 
+import mgrs as _mgrs_lib
 from pystac_client import Client as STACClient
 
 from ember.config import settings
@@ -119,6 +120,43 @@ def _cache_scene(scene: Scene) -> None:
         for key_to_remove, _ in sorted_entries[: len(sorted_entries) // 5]:
             del _scene_cache[key_to_remove]
     _scene_cache[scene.id] = {"timestamp": time(), "data": scene}
+
+
+def _intersecting_mgrs_tiles(bbox: tuple[float, float, float, float]) -> set[str]:
+    """Compute the set of MGRS 100 km grid square IDs that intersect a bbox.
+
+    bbox is (min_lon, min_lat, max_lon, max_lat) in WGS84.
+    Returns canonical Sentinel-2 tile IDs (e.g. "10TES"), uppercase, no spaces.
+
+    Uses a sampling grid with step ~0.4° (~44 km at mid-latitudes — smaller than
+    one 100 km MGRS tile) to ensure every tile inside the bbox is captured.  The
+    four corners are always sampled so narrow bboxes still return at least one tile.
+    Over-inclusion is harmless; under-inclusion is not.
+    """
+    min_lon, min_lat, max_lon, max_lat = bbox
+    m = _mgrs_lib.MGRS()
+    tiles: set[str] = set()
+
+    step = 0.4
+
+    # Walk the grid
+    lat = min_lat
+    while lat <= max_lat:
+        lon = min_lon
+        while lon <= max_lon:
+            tiles.add(m.toMGRS(lat, lon, MGRSPrecision=0))
+            lon += step
+        # Always include the right edge
+        tiles.add(m.toMGRS(lat, max_lon, MGRSPrecision=0))
+        lat += step
+    # Always include the top edge
+    lon = min_lon
+    while lon <= max_lon:
+        tiles.add(m.toMGRS(max_lat, lon, MGRSPrecision=0))
+        lon += step
+    tiles.add(m.toMGRS(max_lat, max_lon, MGRSPrecision=0))
+
+    return tiles
 
 
 def _item_to_scene(item: Any) -> Scene:
@@ -248,25 +286,19 @@ class STACService:
 
         Implements a progressive search loop driven by
         ``settings.sentinel_search_windows`` (default [30, 60, 90] days).
-        The loop widens the look-back window step by step until every tile
-        identified in the first window has a best-scene assigned, or the
-        window list is exhausted.  Results from all windows are merged so
-        that tiles covered by the narrowest window keep their fresher/clearer
-        scene while tiles not yet covered pick up candidates from wider
-        windows.
+        The loop widens the look-back window step by step until every MGRS tile
+        that geographically intersects the requested bbox has a best-scene
+        assigned, or the window list is exhausted.  Results from all windows are
+        merged so that tiles covered by the narrowest window keep their
+        fresher/clearer scene while tiles not yet covered pick up candidates from
+        wider windows.
 
-        **Tile-discovery limitation (Option B):** No MGRS geometry resolver
-        is available in this environment, so the required tile set is fixed
-        after the first window fires — it equals the MGRS tile IDs present in
-        the first window's STAC results.  A tile that returns no scene at all
-        within the full window history cannot be detected as missing; it will
-        render transparent on the client (Phase 2 ``nodata=0`` handles this
-        gracefully).  Tests that exercise the escalation path therefore patch
-        ``pick_best_per_tile`` to simulate an unresolvable tile so the uncovered
-        set becomes non-empty and drives further windows.  This is acceptable for
-        v1; a future slice can add an MGRS library (e.g. ``mgrs``) to
-        pre-compute bbox-intersecting tiles and detect true gaps before the
-        first query fires.
+        The required tile set is computed locally before any STAC query fires,
+        using the ``mgrs`` library to sample the bbox at 0.4° intervals and
+        resolve each sample to its containing 100 km MGRS grid square.  This
+        means a tile that has zero scenes within the full 90-day window is
+        correctly detected as missing and named in the exhaustion warning, rather
+        than silently absent.
 
         Fetches up to 20 scenes per window — enough for bboxes spanning up to
         ~4-6 MGRS tiles with multiple date options per tile.
@@ -279,9 +311,10 @@ class STACService:
         accumulated_scenes: list[Scene] = []
         best_per_tile: dict[str, Scene] = {}
 
-        # The required tile set is established after the first window.
-        # Subsequent windows only need to fill tiles that are still uncovered.
-        required_tiles: set[str] | None = None
+        # Pre-compute the required tile set from the bbox geometry before any
+        # STAC query fires (Option A).  A tile absent from every window's results
+        # is now detectable and named in the exhaustion warning.
+        required_tiles: set[str] = _intersecting_mgrs_tiles(query.bbox)
 
         for window_days in settings.sentinel_search_windows:
             start_date = (now - timedelta(days=window_days)).strftime("%Y-%m-%d")
@@ -290,7 +323,7 @@ class STACService:
                 bbox=query.bbox,
                 start_date=start_date,
                 end_date=end_date,
-                max_cloud_cover=query.max_cloud_cover,
+                max_cloud_cover=100.0,  # Accept all scenes — cloudy fill beats no fill
                 limit=20,
             )
             window_scenes = await self.search_scenes(window_query)
@@ -302,10 +335,6 @@ class STACService:
             accumulated_scenes = accumulated_scenes + window_scenes
             new_best = pick_best_per_tile(accumulated_scenes)
             best_per_tile = {s.mgrs_tile or s.id: s for s in new_best}
-
-            # Fix the required tile set from the first window's results (Option B).
-            if required_tiles is None:
-                required_tiles = {s.mgrs_tile or s.id for s in window_scenes}
 
             covered_tile_ids = set(best_per_tile.keys())
             uncovered = required_tiles - covered_tile_ids
@@ -323,7 +352,6 @@ class STACService:
             )
         else:
             # Loop exhausted without break — some tiles remain uncovered.
-            required_tiles = required_tiles or set()
             uncovered = required_tiles - set(best_per_tile.keys())
             if uncovered:
                 logger.warning(
