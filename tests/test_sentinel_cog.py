@@ -299,12 +299,17 @@ class TestComputeIndex:
 # =============================================================================
 
 
-def _make_scene(scene_id: str, mgrs_tile: str, assets: dict[str, str]) -> Scene:
+def _make_scene(
+    scene_id: str,
+    mgrs_tile: str,
+    assets: dict[str, str],
+    bbox: tuple[float, float, float, float] = (-118.5, 34.0, -118.0, 34.5),
+) -> Scene:
     return Scene(
         id=scene_id,
         datetime="2026-03-15T18:00:00Z",
         cloud_cover=5.0,
-        bbox=(-118.5, 34.0, -118.0, 34.5),
+        bbox=bbox,
         mgrs_tile=mgrs_tile,
         assets=assets,
     )
@@ -313,7 +318,7 @@ def _make_scene(scene_id: str, mgrs_tile: str, assets: dict[str, str]) -> Scene:
 class TestReadBandsMosaic:
     @pytest.mark.asyncio
     async def test_single_scene_delegates_to_read_bands(self, cog_service, sample_bbox):
-        """With one scene, mosaic should just call read_bands."""
+        """With one scene, mosaic falls back to viewport-clip read_bands."""
         scene = _make_scene(
             "S2A_11SLT",
             "11SLT",
@@ -332,65 +337,104 @@ class TestReadBandsMosaic:
                 "B03": band_array,
             },
         ) as mock_rb:
-            result = await cog_service.read_bands_mosaic([scene], ["B04", "B03"], sample_bbox, 64)
+            mosaic, eff_bbox = await cog_service.read_bands_mosaic(
+                [scene], ["B04", "B03"], sample_bbox, 64
+            )
 
         mock_rb.assert_called_once()
-        assert set(result.keys()) == {"B04", "B03"}
+        assert set(mosaic.keys()) == {"B04", "B03"}
+        # Single-scene path returns the requested viewport bbox unchanged.
+        assert eff_bbox == sample_bbox
 
     @pytest.mark.asyncio
-    async def test_two_scenes_stitched(self, cog_service, sample_bbox):
-        """Two scenes with complementary data should fill the full canvas."""
-        scene_a = _make_scene("S2A_11SLT", "11SLT", {"B04": "s3://a/B04.tif"})
-        scene_b = _make_scene("S2B_11SLU", "11SLU", {"B04": "s3://b/B04.tif"})
-
-        # Scene A covers top half, scene B covers bottom half
-        top_half = np.zeros((64, 64), dtype=np.float32)
-        top_half[:32, :] = 5000.0
-
-        bottom_half = np.zeros((64, 64), dtype=np.float32)
-        bottom_half[32:, :] = 3000.0
-
-        call_count = 0
+    async def test_two_scenes_placed_by_geographic_offset(self, cog_service, sample_bbox):
+        """Two side-by-side tiles land in their own canvas slots by bbox geometry."""
+        # scene_a is the left tile, scene_b is the right tile. Square tiles,
+        # adjacent in longitude, identical latitude span. Union has aspect 2:1.
+        scene_a = _make_scene(
+            "S2A_LEFT",
+            "11SLT",
+            {"B04": "s3://a/B04.tif"},
+            bbox=(-118.5, 34.0, -118.0, 34.5),
+        )
+        scene_b = _make_scene(
+            "S2B_RIGHT",
+            "11SLU",
+            {"B04": "s3://b/B04.tif"},
+            bbox=(-118.0, 34.0, -117.5, 34.5),
+        )
 
         def mock_read_sync(href, bbox, max_size):
-            nonlocal call_count
-            call_count += 1
-            if "a/" in href:
-                return top_half
-            return bottom_half
+            # Each tile reads its own bbox at its slot resolution. With
+            # max_size=64 and aspect 2, canvas is (32, 64); each slot is 32x32.
+            value = 5000.0 if "a/" in href else 3000.0
+            return np.ones((max_size, max_size), dtype=np.float32) * value
 
         with patch.object(cog_service, "_read_band_sync", side_effect=mock_read_sync):
-            result = await cog_service.read_bands_mosaic(
+            mosaic, eff_bbox = await cog_service.read_bands_mosaic(
                 [scene_a, scene_b], ["B04"], sample_bbox, 64
             )
 
-        canvas = result["B04"]
-        assert canvas.shape == (64, 64)
-        # Top half should have scene A data
-        assert canvas[0, 0] == 5000.0
-        # Bottom half should have scene B data
-        assert canvas[63, 0] == 3000.0
-        # No zeros left
-        assert np.all(canvas > 0)
+        canvas = mosaic["B04"]
+        # Aspect ratio 2:1 → out_w=64, out_h=32.
+        assert canvas.shape == (32, 64)
+        # Left half = scene_a (5000), right half = scene_b (3000).
+        assert np.all(canvas[:, :32] == 5000.0)
+        assert np.all(canvas[:, 32:] == 3000.0)
+        # Effective bbox is the union of the two tile bboxes.
+        assert eff_bbox == (-118.5, 34.0, -117.5, 34.5)
+
+    @pytest.mark.asyncio
+    async def test_overlap_first_tile_wins(self, cog_service, sample_bbox):
+        """Where two tile bboxes overlap, the first-listed tile fills first."""
+        # Identical bboxes → full overlap. scene_a written first wins everywhere.
+        bbox = (-118.5, 34.0, -118.0, 34.5)
+        scene_a = _make_scene("S2A", "11SLT", {"B04": "s3://a/B04.tif"}, bbox=bbox)
+        scene_b = _make_scene("S2B", "11SLU", {"B04": "s3://b/B04.tif"}, bbox=bbox)
+
+        def mock_read_sync(href, bbox, max_size):
+            value = 5000.0 if "a/" in href else 3000.0
+            return np.ones((max_size, max_size), dtype=np.float32) * value
+
+        with patch.object(cog_service, "_read_band_sync", side_effect=mock_read_sync):
+            mosaic, _ = await cog_service.read_bands_mosaic(
+                [scene_a, scene_b], ["B04"], sample_bbox, 64
+            )
+
+        # scene_a (5000) wins on full overlap.
+        assert np.all(mosaic["B04"] == 5000.0)
 
     @pytest.mark.asyncio
     async def test_skips_scene_with_missing_bands(self, cog_service, sample_bbox):
-        """Scene missing a requested band should be skipped, not error."""
+        """Scene missing a requested band is dropped, not raised."""
         scene_ok = _make_scene("S2A_OK", "11SLT", {"B04": "s3://ok/B04.tif"})
-        scene_bad = _make_scene("S2B_BAD", "11SLU", {})  # No bands
+        scene_bad = _make_scene("S2B_BAD", "11SLU", {})  # no bands
 
         data = np.ones((64, 64), dtype=np.float32) * 5000
 
         with patch.object(cog_service, "_read_band_sync", return_value=data):
-            result = await cog_service.read_bands_mosaic(
-                [scene_ok, scene_bad], ["B04"], sample_bbox, 64
-            )
+            with patch.object(cog_service, "read_bands", return_value={"B04": data}) as mock_rb:
+                mosaic, eff_bbox = await cog_service.read_bands_mosaic(
+                    [scene_ok, scene_bad], ["B04"], sample_bbox, 64
+                )
 
-        assert result["B04"].shape == (64, 64)
+        # After filtering scene_bad, only scene_ok remains → single-scene fast path.
+        mock_rb.assert_called_once()
+        assert "B04" in mosaic
+        assert eff_bbox == sample_bbox
+
+    @pytest.mark.asyncio
+    async def test_raises_when_no_scene_has_requested_bands(self, cog_service, sample_bbox):
+        """All scenes missing requested bands → ValueError, not silent empty result."""
+        scene_a = _make_scene("S2A", "11SLT", {})
+        scene_b = _make_scene("S2B", "11SLU", {})
+
+        with pytest.raises(ValueError, match="No scenes contain all requested bands"):
+            await cog_service.read_bands_mosaic([scene_a, scene_b], ["B04"], sample_bbox, 64)
 
     @pytest.mark.asyncio
     async def test_truecolor_with_mosaic(self, cog_service, sample_bbox):
-        """get_truecolor with multiple scenes should use mosaic path."""
+        """get_truecolor with multiple scenes uses the mosaic path and propagates union bbox."""
         scenes = [
             _make_scene(
                 "S2A_11SLT",
@@ -400,6 +444,7 @@ class TestReadBandsMosaic:
                     "B03": "s3://a/B03.tif",
                     "B02": "s3://a/B02.tif",
                 },
+                bbox=(-118.5, 34.0, -118.0, 34.5),
             ),
             _make_scene(
                 "S2B_11SLU",
@@ -409,15 +454,19 @@ class TestReadBandsMosaic:
                     "B03": "s3://b/B03.tif",
                     "B02": "s3://b/B02.tif",
                 },
+                bbox=(-118.0, 34.0, -117.5, 34.5),
             ),
         ]
         band_data = {
-            "B04": np.ones((64, 64), dtype=np.float32) * 3000,
-            "B03": np.ones((64, 64), dtype=np.float32) * 3000,
-            "B02": np.ones((64, 64), dtype=np.float32) * 3000,
+            "B04": np.ones((32, 64), dtype=np.float32) * 3000,
+            "B03": np.ones((32, 64), dtype=np.float32) * 3000,
+            "B02": np.ones((32, 64), dtype=np.float32) * 3000,
         }
+        union_bbox = (-118.5, 34.0, -117.5, 34.5)
 
-        with patch.object(cog_service, "read_bands_mosaic", return_value=band_data) as mock_mosaic:
+        with patch.object(
+            cog_service, "read_bands_mosaic", return_value=(band_data, union_bbox)
+        ) as mock_mosaic:
             result = await cog_service.get_truecolor(
                 scene_id="S2A_11SLT",
                 assets=scenes[0].assets,
@@ -429,6 +478,8 @@ class TestReadBandsMosaic:
 
         mock_mosaic.assert_called_once()
         assert result["status"] == "success"
+        # Response bbox reflects the mosaic's effective extent (union), not the request.
+        assert tuple(result["bbox"]) == union_bbox
 
 
 # =============================================================================
