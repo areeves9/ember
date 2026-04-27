@@ -4,6 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Response
 
+from ember.auth import require_auth
 from ember.config import settings
 from ember.services.terrain import get_terrain_service
 
@@ -49,7 +50,7 @@ async def get_terrain(
         int | None,
         Query(ge=64, le=2048, description="Max raster dimension in pixels (default 512)"),
     ] = None,
-    # _user: dict = require_auth,  # TODO: Re-enable after testing
+    _user: dict = require_auth,
 ):
     """
     Get terrain data at a point or for a bounding box.
@@ -240,7 +241,9 @@ async def get_terrain(
 
 
 @router.get("/layers")
-async def list_layers():
+async def list_layers(
+    _user: dict = require_auth,
+):
     """List available terrain layers."""
     service = get_terrain_service()
     if not service:

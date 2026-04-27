@@ -11,7 +11,11 @@ from fastapi.testclient import TestClient
 # Set environment variable BEFORE any imports
 os.environ.setdefault("LANDFIRE_S3_PREFIX", "s3://landfire/")
 
+from ember.auth import verify_token
 from ember.main import create_app
+
+
+_DEV_USER = {"sub": "dev-user", "email": "dev@localhost", "auth_type": "dev"}
 
 
 # =============================================================================
@@ -22,6 +26,7 @@ from ember.main import create_app
 def client():
     """Provide TestClient for the FastAPI app."""
     app = create_app()
+    app.dependency_overrides[verify_token] = lambda: _DEV_USER
     return TestClient(app)
 
 
