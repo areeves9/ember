@@ -14,6 +14,34 @@ router = APIRouter(prefix="/terrain", tags=["terrain"])
 # LANDFIRE data is updated annually, so a full day of browser caching is safe.
 FULL_EXTENT_CACHE_SECONDS = 86400
 
+# LANDFIRE coverage regions as (min_lon, min_lat, max_lon, max_lat).
+# Bounds are deliberately generous to avoid false rejections at edges.
+LANDFIRE_BOUNDS = {
+    "conus": (-125.0, 24.0, -66.0, 50.0),
+    "alaska": (-180.0, 51.0, -130.0, 72.0),
+    "hawaii": (-161.0, 18.0, -154.0, 23.0),
+}
+
+
+def _bboxes_overlap(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> bool:
+    """Return True if two bboxes (min_lon, min_lat, max_lon, max_lat) overlap."""
+    a_min_lon, a_min_lat, a_max_lon, a_max_lat = a
+    b_min_lon, b_min_lat, b_max_lon, b_max_lat = b
+    return (
+        a_min_lon < b_max_lon
+        and a_max_lon > b_min_lon
+        and a_min_lat < b_max_lat
+        and a_max_lat > b_min_lat
+    )
+
+
+def _bbox_intersects_landfire(bbox: tuple[float, float, float, float]) -> bool:
+    """Return True if bbox intersects any LANDFIRE coverage region."""
+    return any(_bboxes_overlap(bbox, region) for region in LANDFIRE_BOUNDS.values())
+
 
 @router.get("")
 async def get_terrain(
@@ -149,6 +177,12 @@ async def get_terrain(
         raise HTTPException(
             status_code=400,
             detail="Cannot mix point and bbox parameters. Use one or the other.",
+        )
+
+    if has_bbox and not _bbox_intersects_landfire((min_lon, min_lat, max_lon, max_lat)):
+        raise HTTPException(
+            status_code=400,
+            detail="bbox outside LANDFIRE coverage (CONUS, Alaska, or Hawaii required)",
         )
 
     service = get_terrain_service()
