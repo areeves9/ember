@@ -121,3 +121,106 @@ class TestTerrainRouterSuccess:
         data = response.json()
         assert "available" in data
         assert "layers" in data
+
+
+# =============================================================================
+# LANDFIRE Coverage Validation Tests
+# =============================================================================
+
+class TestBboxOverlapHelper:
+    """Unit tests for the bbox overlap primitive."""
+
+    def test_overlapping_bboxes(self):
+        from ember.routers.terrain import _bboxes_overlap
+        a = (-120.0, 30.0, -110.0, 40.0)
+        b = (-115.0, 35.0, -105.0, 45.0)
+        assert _bboxes_overlap(a, b) is True
+
+    def test_disjoint_bboxes(self):
+        from ember.routers.terrain import _bboxes_overlap
+        a = (-120.0, 30.0, -110.0, 40.0)
+        b = (0.0, 30.0, 10.0, 40.0)
+        assert _bboxes_overlap(a, b) is False
+
+    def test_touching_edges_do_not_overlap(self):
+        """Strict inequality — sharing an edge is not an overlap."""
+        from ember.routers.terrain import _bboxes_overlap
+        a = (-120.0, 30.0, -110.0, 40.0)
+        b = (-110.0, 30.0, -100.0, 40.0)  # shares east edge of a
+        assert _bboxes_overlap(a, b) is False
+
+    def test_one_contains_other(self):
+        from ember.routers.terrain import _bboxes_overlap
+        outer = (-130.0, 20.0, -100.0, 50.0)
+        inner = (-120.0, 30.0, -110.0, 40.0)
+        assert _bboxes_overlap(outer, inner) is True
+        assert _bboxes_overlap(inner, outer) is True
+
+
+class TestLandfireCoverage:
+    """Unit tests for LANDFIRE coverage detection."""
+
+    def test_conus_bbox_intersects(self):
+        from ember.routers.terrain import _bbox_intersects_landfire
+        # Los Angeles area
+        assert _bbox_intersects_landfire((-118.5, 34.0, -118.0, 34.5)) is True
+
+    def test_alaska_bbox_intersects(self):
+        from ember.routers.terrain import _bbox_intersects_landfire
+        # Fairbanks area
+        assert _bbox_intersects_landfire((-147.5, 64.0, -147.0, 64.5)) is True
+
+    def test_hawaii_bbox_intersects(self):
+        from ember.routers.terrain import _bbox_intersects_landfire
+        # Big Island
+        assert _bbox_intersects_landfire((-156.0, 19.0, -155.5, 19.5)) is True
+
+    def test_europe_bbox_does_not_intersect(self):
+        from ember.routers.terrain import _bbox_intersects_landfire
+        # Paris
+        assert _bbox_intersects_landfire((2.0, 48.5, 2.5, 49.0)) is False
+
+    def test_atlantic_bbox_does_not_intersect(self):
+        from ember.routers.terrain import _bbox_intersects_landfire
+        assert _bbox_intersects_landfire((-40.0, 30.0, -30.0, 40.0)) is False
+
+    def test_bbox_spanning_pacific_to_conus_intersects(self):
+        """A bbox that partially overlaps CONUS should be allowed."""
+        from ember.routers.terrain import _bbox_intersects_landfire
+        # West edge in Pacific, east edge in California
+        assert _bbox_intersects_landfire((-140.0, 35.0, -118.0, 40.0)) is True
+
+
+class TestRouterCoverageRejection:
+    """Integration tests: router returns 400 for bboxes outside LANDFIRE coverage."""
+
+    def test_bbox_in_europe_returns_400(self, client):
+        response = client.get(
+            "/api/v1/terrain?min_lat=48.5&max_lat=49.0&min_lon=2.0&max_lon=2.5&layers=fuel&format=raster"
+        )
+        assert response.status_code == 400
+        assert "outside LANDFIRE coverage" in response.json()["detail"]
+
+    def test_bbox_in_atlantic_returns_400(self, client):
+        response = client.get(
+            "/api/v1/terrain?min_lat=30.0&max_lat=40.0&min_lon=-40.0&max_lon=-30.0&layers=fuel&format=raster"
+        )
+        assert response.status_code == 400
+        assert "outside LANDFIRE coverage" in response.json()["detail"]
+
+    def test_bbox_in_europe_json_format_also_returns_coverage_error(self, client):
+        """Coverage check should fire before format-specific handling."""
+        response = client.get(
+            "/api/v1/terrain?min_lat=48.5&max_lat=49.0&min_lon=2.0&max_lon=2.5&format=json"
+        )
+        assert response.status_code == 400
+        assert "outside LANDFIRE coverage" in response.json()["detail"]
+
+    def test_bbox_in_conus_not_blocked_by_coverage_check(self, client):
+        """CONUS bbox should pass coverage validation (may still 502 at service layer)."""
+        response = client.get(
+            "/api/v1/terrain?min_lat=34.0&max_lat=34.5&min_lon=-118.5&max_lon=-118.0&layers=fuel&format=raster"
+        )
+        # 200 = success, 502 = service error (no S3 in tests).
+        # 400 would mean coverage check rejected it — that's the bug we're guarding against.
+        assert response.status_code in [200, 502]
