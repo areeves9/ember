@@ -294,7 +294,14 @@ class TestTerrainMaxSize:
         )
         mock_get_service.return_value = mock_service
 
+        from ember.auth import verify_token
+
         app = create_app()
+        app.dependency_overrides[verify_token] = lambda: {
+            "sub": "dev-user",
+            "email": "dev@localhost",
+            "auth_type": "dev",
+        }
         client = TestClient(app)
 
         response = client.get(
@@ -341,7 +348,14 @@ class TestTerrainMaxSize:
         )
         mock_get_service.return_value = mock_service
 
+        from ember.auth import verify_token
+
         app = create_app()
+        app.dependency_overrides[verify_token] = lambda: {
+            "sub": "dev-user",
+            "email": "dev@localhost",
+            "auth_type": "dev",
+        }
         client = TestClient(app)
 
         response = client.get(
